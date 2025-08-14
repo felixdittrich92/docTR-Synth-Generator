@@ -1,10 +1,3 @@
-# docTR-Synth-Generator
-A tool to generate synthetic OCR text recognition datasets - made for docTR
-
-# WORK IN PROGRESS
-
-```python
-
 from generator import GenerationConfig, SyntheticDatasetGenerator
 
 config = GenerationConfig(
@@ -31,4 +24,3 @@ config = GenerationConfig(
 
 generator = SyntheticDatasetGenerator(config)
 generator.generate_dataset()
-```

@@ -144,3 +144,9 @@ wandb/
 *.pt
 *.pb
 *.index
+
+# Output folder
+/output_dataset
+
+# Testfiles
+X_TEST.py

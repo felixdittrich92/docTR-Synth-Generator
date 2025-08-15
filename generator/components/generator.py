@@ -1,3 +1,8 @@
+# Copyright (C) 2021-2025, Felix Dittrich.
+
+# This program is licensed under the Apache License 2.0.
+# See LICENSE or go to <https://opensource.org/licenses/Apache-2.0> for full license details.
+
 import multiprocessing as mp
 import random
 from dataclasses import dataclass
@@ -108,8 +113,6 @@ class TextImageGenerator:
             raise ValueError(f"Failed to render visible text for: {text}")
 
         bg_crop = self.background_manager.get_background_crop(rendered.size)
-        if bg_crop is None:
-            return None
 
         # Smooth overlayed text with background and composite
         bg_crop = bg_crop.convert("RGBA")
@@ -128,14 +131,12 @@ class TextImageGenerator:
         """
         print(f"Worker {worker_id} starting...")
 
-        # Initialize generator for this worker
         try:
             generator = TextImageGenerator(config)
             processed_count = 0
 
             while True:
                 try:
-                    # Get task from queue with timeout
                     task = task_queue.get()
 
                     if task is None:  # Poison pill to stop worker
@@ -151,11 +152,10 @@ class TextImageGenerator:
                             if processed_count % 1000 == 0:
                                 print(f"Worker {worker_id}: processed {processed_count} images")
                         else:
-                            print(f"Worker {worker_id}: Skipping '{task.text}' - no suitable font/background")
+                            print(f"Worker {worker_id}: Skipping '{task.text}' - no suitable font")
                     except Exception as e:
                         print(f"Worker {worker_id}: Error generating '{task.text}': {e}")
 
-                    # Report result
                     result_queue.put((task.text, task.filename, success))
 
                 except Empty:

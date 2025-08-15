@@ -3,6 +3,8 @@ A tool to generate synthetic OCR text recognition datasets - made for docTR
 
 # WORK IN PROGRESS
 
+# NOTE: This is only a quick draft and will change in the next time.
+
 ```python
 
 from generator import GenerationConfig, SyntheticDatasetGenerator

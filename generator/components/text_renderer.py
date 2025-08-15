@@ -1,9 +1,13 @@
+# Copyright (C) 2021-2025, Felix Dittrich.
+
+# This program is licensed under the Apache License 2.0.
+# See LICENSE or go to <https://opensource.org/licenses/Apache-2.0> for full license details.
+
 import random
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
-from PIL.Image import Resampling, Transform
+from PIL import Image, ImageDraw, ImageFont
 
+from ..augmentations import AugmentationPipeline, RandomBlur, RandomPerspective, RandomRotate
 from .config import GenerationConfig
 
 __all__ = ["TextRenderer"]
@@ -18,6 +22,12 @@ class TextRenderer:
 
     def __init__(self, config: GenerationConfig):
         self.config = config
+
+        self.augmentations = AugmentationPipeline([
+            RandomRotate(angle_range=config.rotation_range, prob=config.rotation_prob),
+            RandomBlur(radius_range=config.blur_radius_range, prob=config.blur_prob),
+            RandomPerspective(margin=config.perspective_margin, prob=config.perspective_prob),
+        ])
 
     def render_text_to_image(self, text: str, font_path: str) -> Image.Image:
         """Render text to image with random augmentations"""
@@ -45,58 +55,5 @@ class TextRenderer:
             )
 
         # Apply augmentations
-        # TODO: This should be a pipeline instead of a class method
-        image = self._apply_augmentations(image)
+        image = self.augmentations(image)
         return image
-
-    def _apply_augmentations(self, image: Image.Image) -> Image.Image:
-        """Apply random augmentations to the image"""
-        # Rotation
-        if random.random() < self.config.rotation_prob:
-            angle = random.uniform(*self.config.rotation_range)
-            image = image.rotate(angle, expand=True, resample=Resampling.BICUBIC)
-
-        # Blur
-        if random.random() < self.config.blur_prob:
-            radius = random.uniform(*self.config.blur_radius_range)
-            image = image.filter(ImageFilter.GaussianBlur(radius=radius))
-
-        # Perspective distortion
-        if random.random() < self.config.perspective_prob:
-            image = self._random_perspective_distort(image)
-
-        return image
-
-    def _random_perspective_distort(self, image: Image.Image) -> Image.Image:
-        """Apply random perspective distortion"""
-        width, height = image.size
-        margin = self.config.perspective_margin
-
-        def rand_offset():
-            return random.randint(-margin, margin)
-
-        # Source points (distorted)
-        src_points = [
-            (rand_offset(), rand_offset()),
-            (width + rand_offset(), rand_offset()),
-            (width + rand_offset(), height + rand_offset()),
-            (rand_offset(), height + rand_offset()),
-        ]
-        # Destination points (regular rectangle)
-        dst_points = [(0, 0), (width, 0), (width, height), (0, height)]
-
-        coeffs = self._find_coeffs(src_points, dst_points)
-        return image.transform(
-            size=(width, height), method=Transform.PERSPECTIVE, data=coeffs, resample=Resampling.BICUBIC
-        )
-
-    def _find_coeffs(self, pa, pb):
-        """Calculate perspective transform coefficients"""
-        matrix = []
-        for p1, p2 in zip(pa, pb):
-            matrix.append([p1[0], p1[1], 1, 0, 0, 0, -p2[0] * p1[0], -p2[0] * p1[1]])
-            matrix.append([0, 0, 0, p1[0], p1[1], 1, -p2[1] * p1[0], -p2[1] * p1[1]])
-        mat_a = np.array(matrix, dtype=np.float64)
-        mat_b = np.array(pb).reshape(8)
-        coeffs, _, _, _ = np.linalg.lstsq(mat_a, mat_b, rcond=None)
-        return coeffs

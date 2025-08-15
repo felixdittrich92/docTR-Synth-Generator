@@ -40,3 +40,34 @@ config = GenerationConfig(
 generator = SyntheticDatasetGenerator(config)
 generator.generate_dataset()
 ```
+
+## Citation
+
+If you wish to cite please refer to the base project citation, feel free to use this [BibTeX](http://www.bibtex.org/) references:
+
+```bibtex
+@misc{docTR-Synth-Generator,
+    title={docTR-Synth-Generator: A tool to generate synthetic OCR text recognition datasets - made for docTR},
+    author={{Dittrich, Felix}},
+    year={2025},
+    publisher = {GitHub},
+    howpublished = {\url{https://github.com/felixdittrich92/docTR-Synth-Generator}}
+}
+```
+
+## Contributing
+
+Contributions are what make the open-source community such an amazing place to learn, inspire, and create.
+
+Any contributions you make are **greatly appreciated**.
+
+1. Fork the Project
+2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
+3. Add your Changes
+4. Run the tests and quality checks (`make test` and `make style` and `make quality`)
+5. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
+6. Push to the Branch (`git push origin feature/AmazingFeature`)
+
+## License
+
+Distributed under the Apache 2.0 License. See [`LICENSE`](https://github.com/felixdittrich92/OnnxTR?tab=Apache-2.0-1-ov-file#readme) for more information.

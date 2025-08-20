@@ -41,6 +41,11 @@ generator = SyntheticDatasetGenerator(config)
 generator.generate_dataset()
 ```
 
+## Resources
+
+- **fonts_v1**: A collection of fonts used for text rendering can be downloaded from [Fonts_v1](https://github.com/felixdittrich92/docTR-Synth-Generator/releases/download/v0.0.1/fonts_v1.zip).
+- **background_images_v1**: A collection of background images used for text rendering can be downloaded from [Background_Images_v1](https://github.com/felixdittrich92/docTR-Synth-Generator/releases/download/v0.0.1/background_images_v1.zip).
+
 ## Citation
 
 If you wish to cite please refer to the base project citation, feel free to use this [BibTeX](http://www.bibtex.org/) references:

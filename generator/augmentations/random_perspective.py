@@ -65,7 +65,7 @@ class RandomPerspective:
             size=(width, height), method=Transform.PERSPECTIVE, data=coeffs, resample=Resampling.BICUBIC
         )
 
-    def _find_coeffs(self, pa, pb):
+    def _find_coeffs(self, pa: list[tuple[int, int]], pb: list[tuple[int, int]]) -> list[float]:
         """Calculate perspective transform coefficients"""
         matrix = []
         for p1, p2 in zip(pa, pb):

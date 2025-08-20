@@ -24,7 +24,7 @@ config = GenerationConfig(
     val_percent=0.2,
     num_workers=6,  # Start with fewer workers to avoid memory issues
     queue_maxsize=100,  # Limit queue size
-    font_size_range=(18, 35),
+    font_size_range=(15, 40),
     padding=2,
     max_attempts=5,
     # Augmentation settings
@@ -35,6 +35,8 @@ config = GenerationConfig(
     rotation_range=(-2, 2),
     blur_radius_range=(0.3, 1.0),
     perspective_margin=2,
+    pixel_dropout_range=(0.1, 0.2),
+    pixel_dropout_prob=0.15,
 )
 
 generator = SyntheticDatasetGenerator(config)

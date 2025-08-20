@@ -41,7 +41,7 @@ class GenerationConfig:
     bg_image_dir: str | None = None
     val_percent: float = 0.2
     num_workers: int = 4
-    font_size_range: tuple[int, int] = (18, 35)
+    font_size_range: tuple[int, int] = (15, 40)
     padding: int = 4
     max_attempts: int = 5
     queue_maxsize: int = 100  # Limit queue size to control memory usage
@@ -54,3 +54,5 @@ class GenerationConfig:
     rotation_range: tuple[float, float] = (-2, 2)
     blur_radius_range: tuple[float, float] = (0.3, 1.0)
     perspective_margin: int = 2
+    pixel_dropout_range: tuple[float, float] = (0.1, 0.2)
+    pixel_dropout_prob: float = 0.2

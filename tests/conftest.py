@@ -8,7 +8,7 @@ from PIL import Image
 
 @pytest.fixture
 def sample_image():
-    return Image.new("RGB", (10, 10), color="red")
+    return Image.new("RGBA", (10, 10), color="red")
 
 
 @pytest.fixture

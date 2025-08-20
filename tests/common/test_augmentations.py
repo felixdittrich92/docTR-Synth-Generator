@@ -5,6 +5,7 @@ from generator.augmentations import (
     AugmentationPipeline,
     RandomBlur,
     RandomPerspective,
+    RandomPixelDropout,
     RandomRotate,
 )
 
@@ -54,7 +55,9 @@ def test_randomperspective_find_coeffs_matches_known():
     pa = [(0, 0), (1, 0), (1, 1), (0, 1)]
     pb = [(0, 0), (2, 0), (2, 2), (0, 2)]
     coeffs = rp._find_coeffs(pa, pb)
-    assert np.allclose(coeffs.shape, (8,))
+    assert len(coeffs) == 8
+    assert np.isclose(coeffs[0], 2.0)
+    assert np.isclose(coeffs[4], 2.0)
     # transform 0,0 should map close to 0,0 in pb space
     # we won't check exact match because it's LSQ
 
@@ -74,11 +77,32 @@ def test_randomrotate_never_applied(sample_image):
     assert "RandomRotate" in repr(rr)
 
 
+def test_randompixel_dropout_always_applied(sample_image):
+    rpd = RandomPixelDropout(pixel_dropout_range=(0.2, 0.4), prob=1.0)
+    result = rpd(sample_image)
+    assert isinstance(result, Image.Image)
+    assert result is not sample_image
+    assert "RandomPixelDropout" in repr(rpd)
+
+    rpd = RandomPixelDropout(pixel_dropout_range=(0.0, 0.0), prob=1.0)
+    result = rpd(sample_image)
+    assert isinstance(result, Image.Image)
+    assert result == sample_image  # no pixels dropped
+
+
+def test_randompixel_dropout_never_applied(sample_image):
+    rpd = RandomPixelDropout(prob=0.0)
+    result = rpd(sample_image)
+    assert result == sample_image  # same object
+    assert "RandomPixelDropout" in repr(rpd)
+
+
 def test_pipeline_with_all_augmentations(sample_image):
     pipeline = AugmentationPipeline([
         RandomBlur(radius_range=(0.1, 0.1), prob=1.0),
         RandomRotate(angle_range=(5, 5), prob=1.0),
         RandomPerspective(margin=1, prob=1.0),
+        RandomPixelDropout(pixel_dropout_range=(0.2, 0.4), prob=1.0),
     ])
     result = pipeline(sample_image)
     assert isinstance(result, Image.Image)

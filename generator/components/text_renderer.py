@@ -7,7 +7,7 @@ import random
 
 from PIL import Image, ImageDraw, ImageFont
 
-from ..augmentations import AugmentationPipeline, RandomBlur, RandomPerspective, RandomRotate
+from ..augmentations import AugmentationPipeline, RandomBlur, RandomPerspective, RandomPixelDropout, RandomRotate
 from .config import GenerationConfig
 
 __all__ = ["TextRenderer"]
@@ -27,6 +27,7 @@ class TextRenderer:
             RandomRotate(angle_range=config.rotation_range, prob=config.rotation_prob),
             RandomBlur(radius_range=config.blur_radius_range, prob=config.blur_prob),
             RandomPerspective(margin=config.perspective_margin, prob=config.perspective_prob),
+            RandomPixelDropout(pixel_dropout_range=config.pixel_dropout_range, prob=config.pixel_dropout_prob),
         ])
 
     def render_text_to_image(self, text: str, font_path: str) -> Image.Image:

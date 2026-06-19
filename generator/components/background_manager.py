@@ -97,3 +97,38 @@ class BackgroundManager:
                 return bg.crop((x, y, x + crop_width, y + crop_height))
 
         return Image.new("RGB", size, (255, 255, 255))
+
+    def get_page_background(self, size: tuple[int, int]) -> Image.Image:
+        """Get a full-page background of the requested size.
+
+        Unlike :meth:`get_background_crop` (which only crops and falls back to a
+        blank when the source is too small), this always fills the whole page:
+        a large enough image is randomly cropped, a smaller one is resized to
+        cover the page, and with no images a subtly tinted "paper" is returned.
+
+        Args:
+            size (tuple[int, int]): Desired page size (width, height).
+
+        Returns:
+            Image.Image: RGB page-sized background.
+        """
+        width, height = size
+        if self.bg_images:
+            for _ in range(10):
+                bg = self._get_image(random.choice(self.bg_images))
+                if bg is None:
+                    continue
+                bw, bh = bg.size
+                if bw >= width and bh >= height:
+                    x = random.randint(0, bw - width)
+                    y = random.randint(0, bh - height)
+                    return bg.crop((x, y, x + width, y + height))
+                scale = max(width / bw, height / bh)
+                rw, rh = max(width, int(bw * scale) + 1), max(height, int(bh * scale) + 1)
+                resized = bg.resize((rw, rh), Image.LANCZOS)  # type: ignore[attr-defined]
+                x = random.randint(0, rw - width)
+                y = random.randint(0, rh - height)
+                return resized.crop((x, y, x + width, y + height))
+
+        tone = random.randint(238, 252)
+        return Image.new("RGB", size, (tone, tone, max(0, tone - 3)))

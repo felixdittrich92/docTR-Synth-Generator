@@ -27,3 +27,20 @@ def test_balancing_and_cache_defaults():
     assert cfg.min_char_coverage == 0
     assert cfg.bg_cache_size == 16
     assert cfg.supersample >= 1
+
+
+def test_detection_defaults():
+    cfg = GenerationConfig(output_dir="ds", num_images=10)
+    # Recognition stays the default task; detection is opt-in.
+    assert cfg.task == "recognition"
+    assert cfg.det_page_width_range[0] < cfg.det_page_width_range[1]
+    assert 0.0 <= cfg.det_plain_background_prob <= 1.0
+    assert cfg.det_max_blocks >= 1
+
+
+def test_background_download_defaults():
+    cfg = GenerationConfig(output_dir="ds", num_images=10)
+    # Backgrounds auto-download by default, but an explicit dir always wins.
+    assert cfg.auto_download_backgrounds is True
+    assert cfg.bg_image_dir is None
+    assert cfg.background_cache_dir is None

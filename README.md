@@ -12,9 +12,10 @@ A tool to generate synthetic OCR text recognition datasets - made for docTR
 ## Features
 
 - **Zero-config**: generate a dataset with nothing but an output directory - real
-  words and matching fonts are downloaded automatically.
+  words, matching fonts *and* background images are downloaded automatically.
 - **Multilingual by language code**: `languages=["de", "ru", "ar", ...]` resolves
-  both the words *and* the fonts for each script (~85 languages).
+  both the words *and* the fonts for each script (~85 languages), with correct
+  complex-script shaping and right-to-left layout for Arabic/Hebrew.
 - **No more dropped words**: any character a local font cannot render triggers an
   on-demand download of a font that can, instead of silently skipping the word.
 - **Realistic output**: supersampled anti-aliasing, background-aware ink colour
@@ -22,6 +23,9 @@ A tool to generate synthetic OCR text recognition datasets - made for docTR
   scanner/camera-style degradations (JPEG artifacts, sensor noise, blur).
 - **Controllable balancing**: explicit per-language allocation, a stratified
   train/val split, optional character-coverage guarantees, and a balance report.
+- **Recognition *and* detection**: produce word/line crops for recognition, or
+  full document-like pages with per-word polygons for detection - both in the
+  formats docTR's training references expect.
 - **Fast & memory-bounded**: font objects and decoded backgrounds are cached, with
   a configurable cache size.
 
@@ -98,6 +102,15 @@ Two realism helpers are applied by default and can be tuned or disabled:
 - `numeric_token_ratio` (0.05): mixes in realistic numbers, dates, prices and
   codes - the kind of content real documents are full of.
 
+## Automatic backgrounds
+
+When no `bg_image_dir` is given, a curated set of background images is downloaded
+and cached automatically (instead of producing blank backgrounds). Supplying your
+own `bg_image_dir` takes precedence and skips the download entirely - exactly like
+fonts and word lists. Disable with `auto_download_backgrounds=False`, point
+`background_cache_dir` somewhere persistent, or pass a `background_manifest_url`
+(a newline-separated list of filenames/URLs) to use a different collection.
+
 ## Dataset balancing
 
 For multilingual runs the language mix is explicit and controllable instead of
@@ -119,6 +132,56 @@ words do not leak from train into val. A balance report is printed before
 generation (per-language train/val counts, train/val overlap, distinct/rare
 characters, word-length statistics); silence it with
 `print_balance_report=False`.
+
+## Detection datasets
+
+Set `task="detection"` to generate document-like **pages** with a 4-point
+polygon for every word, ready for
+[docTR detection training](https://github.com/mindee/doctr/tree/main/references/detection):
+
+```python
+config = GenerationConfig(
+    task="detection",
+    output_dir="detection_dataset",
+    num_images=5000,  # = number of pages
+    languages=["en", "de"],  # words + fonts resolved automatically
+    bg_image_dir="resources/background_images",
+    output_jpeg=True,
+)
+SyntheticDatasetGenerator(config).generate_dataset()
+```
+
+Each split is written as `images/` plus a `labels.json` in the exact docTR
+format (absolute pixel coordinates):
+
+```json
+{
+  "00000.jpg": {
+    "img_dimensions": [1462, 1056],
+    "img_hash": "<sha256 of the image>",
+    "polygons": [[[x1, y1], [x2, y2], [x3, y3], [x4, y4]], ...]
+  }
+}
+```
+
+It reuses the same fonts, ink styling, contrast, backgrounds and degradations as
+the recognition path, and lays words out in paragraph blocks with margins, line
+wrapping, occasional headings/indents, numbers and dates, and an optional small
+global page rotation (the polygons rotate with the page, giving rotated boxes
+usable with docTR's `use_polygons=True`). Tune layout with the `det_*` config
+fields (`det_page_*_range`, `det_font_size_range`, `det_words_per_page_range`,
+`det_max_blocks`, `det_rotation_*`, ...).
+
+> **Backgrounds for detection:** only the words *you* place are labelled, so any
+> text already printed in a background photo becomes an unlabelled false
+> negative. `det_plain_background_prob` (0.4) mixes in clean generated paper;
+> set it to `1.0` for all-paper pages, or point `bg_image_dir` at **text-free**
+> textures (plain paper, surfaces, fabrics) only.
+
+Non-Latin scripts work out of the box: words and fonts are resolved per language,
+complex scripts are shaped correctly (Arabic joining, Indic conjuncts), and
+right-to-left languages (Arabic, Hebrew, ...) are laid out right-to-left so pages
+read naturally. For example `languages=["ar"]`, `["he"]`, `["zh"]` or `["hi"]`.
 
 ## Realism
 
@@ -188,11 +251,6 @@ make test      # pytest + coverage (fails under 70%)
 make quality   # ruff + mypy
 make style     # auto-format and fix
 ```
-
-New functionality is covered by dedicated tests under `tests/common/`
-(`test_font_downloader.py`, `test_corpus_downloader.py`, `test_dataset_balancer.py`,
-`test_dataset_generator.py`, `test_text_renderer.py`, `test_generator.py`,
-`test_background_manager.py`).
 
 ## Contributing
 

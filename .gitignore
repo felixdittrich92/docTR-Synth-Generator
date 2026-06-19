@@ -147,6 +147,7 @@ wandb/
 
 # Output folder
 /output_dataset
+/detection_dataset
 .corpus_cache
 .font_cache
 generator/version.py

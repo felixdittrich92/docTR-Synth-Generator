@@ -4,7 +4,9 @@
 # See LICENSE or go to <https://opensource.org/licenses/Apache-2.0> for full license details.
 
 import json
+import math
 import multiprocessing as mp
+import random
 import time
 from pathlib import Path
 from queue import Empty
@@ -14,12 +16,15 @@ from .components import (
     CorpusDownloader,
     DatasetBalancer,
     DatasetSplitter,
+    DetectionTask,
     GenerationConfig,
     GenerationTask,
+    PageGenerator,
     TextImageGenerator,
     apply_casing_variants,
     generate_numeric_tokens,
 )
+from .components.background_downloader import BackgroundDownloader
 
 __all__ = ["SyntheticDatasetGenerator", "GenerationConfig"]
 
@@ -33,6 +38,34 @@ class SyntheticDatasetGenerator:
 
     def __init__(self, config: GenerationConfig):
         self.config = config
+
+    def _resolve_background_dir(self) -> None:
+        """Resolve the effective background directory once (main process).
+
+        Precedence: an explicit ``bg_image_dir`` wins (backward compatible).
+        Otherwise, when ``auto_download_backgrounds`` is set, a curated set is
+        downloaded + cached and that directory is used. Resolving here - before
+        workers spawn - means the download happens once rather than per worker.
+        """
+        cfg = self.config
+        if cfg.bg_image_dir:
+            return
+        if not cfg.auto_download_backgrounds:
+            return
+        cache_dir = cfg.background_cache_dir or ".background_cache"
+        print("No bg_image_dir given - downloading curated background images...")
+        downloader = BackgroundDownloader(
+            cache_dir=cache_dir,
+            manifest_url=cfg.background_manifest_url,
+            timeout=cfg.font_download_timeout,
+            enabled=True,
+        )
+        paths = downloader.download_all()
+        if paths:
+            cfg.bg_image_dir = cache_dir
+            print(f"Using {len(paths)} downloaded backgrounds from {cache_dir}")
+        else:
+            print("No backgrounds available - falling back to blank/generated backgrounds.")
 
     def _prepare_train_val(self) -> tuple[list[str], list[str]]:
         """Resolve the text source and return balanced (train, val) word lists.
@@ -99,7 +132,11 @@ class SyntheticDatasetGenerator:
 
     def generate_dataset(self):
         """Generate the complete dataset with queue-based multiprocessing"""
+        if getattr(self.config, "task", "recognition") == "detection":
+            return self._generate_detection_dataset()
+
         print(f"Generating dataset with {self.config.num_workers} workers...")
+        self._resolve_background_dir()
 
         ext = "jpg" if getattr(self.config, "output_jpeg", False) else "png"
 
@@ -202,6 +239,141 @@ class SyntheticDatasetGenerator:
             task_queue.put(None)
 
         # Wait for all workers to finish
+        for worker in workers:
+            worker.join()
+
+        return successful, labels
+
+    # ------------------------------------------------------------------
+    # Detection dataset generation
+    # ------------------------------------------------------------------
+
+    def _resolve_word_pool(self) -> List[str]:
+        """Build a shuffled pool of words to populate detection pages with."""
+        cfg = self.config
+        if cfg.wordlist_path is not None:
+            words = DatasetSplitter.load_vocabulary(cfg.wordlist_path)
+        else:
+            languages = cfg.languages or ["en"]
+            print(f"No wordlist given - downloading real words for languages: {languages}")
+            downloader = CorpusDownloader(
+                cache_dir=cfg.corpus_cache_dir or ".corpus_cache",
+                timeout=cfg.font_download_timeout,
+                min_word_length=cfg.min_word_length,
+                max_word_length=cfg.max_word_length,
+                filter_by_script=cfg.corpus_filter_by_script,
+            )
+            words = downloader.build_vocabulary(languages, words_per_language=cfg.words_per_language)
+            if cfg.casing_variant_prob > 0:
+                words = apply_casing_variants(words, prob=cfg.casing_variant_prob, seed=cfg.corpus_seed)
+            if cfg.numeric_token_ratio > 0:
+                words = words + generate_numeric_tokens(int(len(words) * cfg.numeric_token_ratio), seed=cfg.corpus_seed)
+        if not words:
+            raise ValueError("No words available for detection page generation. Check connectivity or wordlist.")
+        random.Random(cfg.corpus_seed).shuffle(words)
+        return words
+
+    def _generate_detection_dataset(self):
+        """Generate document-like pages with per-word polygons (docTR format)."""
+        cfg = self.config
+        print(f"Generating DETECTION dataset with {cfg.num_workers} workers...")
+        self._resolve_background_dir()
+        ext = "jpg" if cfg.output_jpeg else "png"
+
+        pool = self._resolve_word_pool()
+        rng = random.Random(cfg.corpus_seed)
+
+        num_val = math.ceil(cfg.num_images * cfg.val_percent)
+        num_train = max(0, cfg.num_images - num_val)
+        print(f"Generating {num_train} training pages and {num_val} validation pages.")
+
+        train_dir = Path(cfg.output_dir) / "train"
+        val_dir = Path(cfg.output_dir) / "val"
+        train_images_dir = train_dir / "images"
+        val_images_dir = val_dir / "images"
+        for d in (train_images_dir, val_images_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        print(f"Output directories created: {train_dir}, {val_dir}")
+
+        def make_tasks(count: int, images_dir: Path, split: str) -> List[DetectionTask]:
+            tasks = []
+            for idx in range(count):
+                page_words = [rng.choice(pool) for _ in range(cfg.det_max_words_per_page)]
+                tasks.append(
+                    DetectionTask(
+                        words=page_words,
+                        save_path=str(images_dir / f"{idx:05d}.{ext}"),
+                        filename=f"{idx:05d}.{ext}",
+                        split=split,
+                    )
+                )
+            return tasks
+
+        print("Generating training pages...")
+        train_tasks = make_tasks(num_train, train_images_dir, "train")
+        train_success, train_labels = self._generate_pages_with_queue(train_tasks)
+        with open(train_dir / "labels.json", "w", encoding="utf-8") as f:
+            json.dump(train_labels, f, ensure_ascii=False, indent=2)
+        print(f"Training labels saved to {train_dir / 'labels.json'}")
+
+        print("Generating validation pages...")
+        val_tasks = make_tasks(num_val, val_images_dir, "val")
+        val_success, val_labels = self._generate_pages_with_queue(val_tasks)
+        with open(val_dir / "labels.json", "w", encoding="utf-8") as f:
+            json.dump(val_labels, f, ensure_ascii=False, indent=2)
+        print(f"Validation labels saved to {val_dir / 'labels.json'}")
+
+        print("Detection dataset generation completed!")
+        print(f"Training: {train_success}/{len(train_tasks)} pages generated successfully")
+        print(f"Validation: {val_success}/{len(val_tasks)} pages generated successfully")
+
+    def _generate_pages_with_queue(self, tasks: List[DetectionTask]) -> Tuple[int, Dict[str, dict]]:
+        """Render detection pages with multiprocessing and collect polygon labels."""
+        task_queue: mp.Queue = mp.Queue(maxsize=self.config.queue_maxsize)
+        result_queue: mp.Queue = mp.Queue()
+
+        workers = []
+        for worker_id in range(self.config.num_workers):
+            worker = mp.Process(
+                target=PageGenerator.detection_worker_process,
+                args=(task_queue, result_queue, self.config, worker_id),
+            )
+            worker.start()
+            workers.append(worker)
+
+        for task in tasks:
+            task_queue.put(task)
+
+        completed = 0
+        successful = 0
+        labels: Dict[str, dict] = {}
+        start_time = time.time()
+
+        while completed < len(tasks):
+            try:
+                filename, _split, dims, img_hash, polygons, success = result_queue.get(timeout=30)
+                completed += 1
+                if success:
+                    successful += 1
+                    labels[filename] = {
+                        "img_dimensions": dims,
+                        "img_hash": img_hash,
+                        "polygons": polygons,
+                    }
+                if completed % 25 == 0 or completed == len(tasks):
+                    elapsed = time.time() - start_time
+                    rate = completed / elapsed if elapsed > 0 else 0
+                    eta = (len(tasks) - completed) / rate if rate > 0 else 0
+                    print(
+                        f"Progress: {completed}/{len(tasks)} ({successful} successful) "
+                        f"Rate: {rate:.1f} pages/s ETA: {eta:.1f}s"
+                    )
+            except Empty:
+                print("Waiting for results...")
+                continue
+
+        for _ in range(self.config.num_workers):
+            task_queue.put(None)
         for worker in workers:
             worker.join()
 

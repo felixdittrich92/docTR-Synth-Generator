@@ -27,7 +27,14 @@ class GenerationConfig:
             relying on ``auto_download_fonts`` (which defaults to True).
         output_dir (str): Directory to save generated images.
         num_images (int): Total number of images to generate.
-        bg_image_dir (str | None): Directory containing background images.
+        bg_image_dir (str | None): Directory containing background images. If
+            ``None`` and ``auto_download_backgrounds`` is set, a curated set is
+            downloaded automatically (otherwise blank backgrounds are used).
+        auto_download_backgrounds (bool): Download a curated background set when
+            no ``bg_image_dir`` is given. Default True.
+        background_cache_dir (str | None): Where to cache downloaded backgrounds.
+        background_manifest_url (str | None): Optional URL of a newline-separated
+            list of background filenames/URLs to use instead of the default set.
         val_percent (float): Percentage of images for the validation set.
         num_workers (int): Number of worker processes for parallel processing.
         font_size_range (tuple[int, int]): Range of font sizes to use.
@@ -106,6 +113,28 @@ class GenerationConfig:
         contrast_jitter (float): Max relative contrast change.
         output_jpeg (bool): Save samples as JPEG instead of PNG.
         output_jpeg_quality (int): Quality used when ``output_jpeg`` is True.
+
+        # --- Detection dataset (task="detection") ---
+        task (str): ``"recognition"`` (word/line crops, default) or
+            ``"detection"`` (document-like pages with per-word polygons, in the
+            docTR detection labels.json format).
+        det_page_width_range (tuple[int, int]): Page width range in pixels.
+        det_page_height_range (tuple[int, int]): Page height range in pixels.
+        det_font_size_range (tuple[int, int]): Body font size range on a page.
+        det_words_per_page_range (tuple[int, int]): Target words placed per page.
+        det_max_words_per_page (int): Candidate words supplied per page (an upper
+            bound; only those that fit are placed).
+        det_margin_ratio (float): Page margin as a fraction of min(width, height).
+        det_block_gap_range (tuple[float, float]): Gap between paragraph blocks as
+            a fraction of the line height.
+        det_max_blocks (int): Maximum paragraph blocks per page.
+        det_heading_prob (float): Probability a block starts as a larger heading.
+        det_plain_background_prob (float): Probability of using a clean generated
+            paper background instead of a texture image. Texture photos that
+            contain their own text would add unlabelled (false-negative) words,
+            so for detection prefer text-free backgrounds or generated paper.
+        det_rotation_prob (float): Probability of a small global page rotation.
+        det_rotation_range (tuple[float, float]): Page rotation angle range (deg).
     """
 
     # Text source (wordlist OR downloaded corpus). All optional => no wordlist required.
@@ -120,6 +149,9 @@ class GenerationConfig:
     bg_image_dir: str | None = None
     bg_cache_size: int = 16
     bg_max_dimension: int = 2000
+    auto_download_backgrounds: bool = True
+    background_cache_dir: str | None = None
+    background_manifest_url: str | None = None
     val_percent: float = 0.2
     num_workers: int = 4
     font_size_range: tuple[int, int] = (15, 40)
@@ -186,6 +218,21 @@ class GenerationConfig:
     contrast_jitter: float = 0.12
     output_jpeg: bool = False
     output_jpeg_quality: int = 90
+
+    # Detection dataset (task="detection")
+    task: str = "recognition"
+    det_page_width_range: tuple[int, int] = (700, 1100)
+    det_page_height_range: tuple[int, int] = (900, 1500)
+    det_font_size_range: tuple[int, int] = (14, 32)
+    det_words_per_page_range: tuple[int, int] = (25, 130)
+    det_max_words_per_page: int = 200
+    det_margin_ratio: float = 0.06
+    det_block_gap_range: tuple[float, float] = (0.5, 1.5)
+    det_max_blocks: int = 9
+    det_heading_prob: float = 0.3
+    det_plain_background_prob: float = 0.4
+    det_rotation_prob: float = 0.3
+    det_rotation_range: tuple[float, float] = (-2.5, 2.5)
 
     def __post_init__(self):
         # When neither a wordlist nor explicit languages are given, default to

@@ -59,11 +59,11 @@ class BackgroundManager:
             return cached
         try:
             with Image.open(path) as bg:
-                bg = bg.convert("RGB")
+                bg = bg.convert("RGB")  # type: ignore[assignment]
                 longest = max(bg.size)
                 if self.max_dimension and longest > self.max_dimension:
                     scale = self.max_dimension / longest
-                    bg = bg.resize((max(1, int(bg.width * scale)), max(1, int(bg.height * scale))), Image.LANCZOS)  # type: ignore[attr-defined]
+                    bg = bg.resize((max(1, int(bg.width * scale)), max(1, int(bg.height * scale))), Image.LANCZOS)  # type: ignore
                 bg.load()
         except Exception as e:
             print(f"Error loading background {path}: {e}")

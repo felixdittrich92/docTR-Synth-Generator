@@ -106,3 +106,37 @@ def test_pipeline_with_all_augmentations(sample_image):
     ])
     result = pipeline(sample_image)
     assert isinstance(result, Image.Image)
+
+
+def test_random_jpeg_compression_applied(sample_image):
+    from generator.augmentations import RandomJpegCompression
+
+    rj = RandomJpegCompression(quality_range=(40, 40), prob=1.0)
+    result = rj(sample_image)
+    assert isinstance(result, Image.Image)
+    assert result.mode == sample_image.mode  # alpha preserved for RGBA input
+    assert "RandomJpegCompression" in repr(rj)
+
+
+def test_random_jpeg_compression_skipped(sample_image):
+    from generator.augmentations import RandomJpegCompression
+
+    rj = RandomJpegCompression(prob=0.0)
+    assert rj(sample_image) is sample_image
+
+
+def test_random_gaussian_noise_applied(sample_image):
+    from generator.augmentations import RandomGaussianNoise
+
+    rn = RandomGaussianNoise(std_range=(10.0, 10.0), prob=1.0)
+    result = rn(sample_image)
+    assert isinstance(result, Image.Image)
+    assert result.size == sample_image.size
+    assert "RandomGaussianNoise" in repr(rn)
+
+
+def test_random_gaussian_noise_skipped(sample_image):
+    from generator.augmentations import RandomGaussianNoise
+
+    rn = RandomGaussianNoise(prob=0.0)
+    assert rn(sample_image) is sample_image

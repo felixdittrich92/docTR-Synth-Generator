@@ -147,6 +147,8 @@ wandb/
 
 # Output folder
 /output_dataset
+.corpus_cache
+.font_cache
 
 # Testfiles
 X_TEST.py

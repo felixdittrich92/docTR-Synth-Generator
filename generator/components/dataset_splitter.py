@@ -1,4 +1,4 @@
-# Copyright (C) 2021-2025, Felix Dittrich.
+# Copyright (C) 2021-2026, Felix Dittrich.
 
 # This program is licensed under the Apache License 2.0.
 # See LICENSE or go to <https://opensource.org/licenses/Apache-2.0> for full license details.
@@ -10,11 +10,11 @@ __all__ = ["DatasetSplitter"]
 
 
 class DatasetSplitter:
-    """Handles dataset splitting logic"""
+    """Handles dataset splitting logic."""
 
     @staticmethod
     def load_vocabulary(wordlist_path: str) -> list[str]:
-        """Load vocabulary from wordlist file
+        """Load vocabulary from a wordlist file.
 
         Args:
             wordlist_path (str): Path to the wordlist file
@@ -26,60 +26,53 @@ class DatasetSplitter:
             return [line.strip() for line in f if line.strip()]
 
     @staticmethod
-    def prepare_splits(words: list[str], num_images: int, val_percent: float) -> tuple[list[str], list[str]]:
-        """Prepare train/validation splits ensuring vocabulary coverage
+    def prepare_splits(
+        words: list[str],
+        num_images: int,
+        val_percent: float,
+        ensure_coverage: bool = True,
+    ) -> tuple[list[str], list[str]]:
+        """Prepare train/validation splits, honouring ``num_images`` as a hard cap.
+
+        Behaviour:
+          * ``num_images`` is always respected as the *total* number of samples.
+          * If the vocabulary is larger than ``num_images`` a uniform random
+            subset is drawn (full coverage is impossible by definition).
+          * If the vocabulary is smaller, every unique word is included at least
+            once (when ``ensure_coverage`` is set) and the remainder is filled by
+            repeating words, so frequent words recur - as in real text.
 
         Args:
-            words (list[str]): List of words from the wordlist
-            num_images (int): Total number of images to generate
-            val_percent (float): Percentage of images for validation set
+            words (list[str]): Source vocabulary (may contain duplicates).
+            num_images (int): Total number of images to generate.
+            val_percent (float): Fraction of images for validation.
+            ensure_coverage (bool): Guarantee each unique word appears at least
+                once across the combined dataset when it fits within num_images.
 
         Returns:
-            tuple[list[str], list[str]]: Train and validation word lists
+            tuple[list[str], list[str]]: Train and validation word lists.
         """
-        vocab = set(words)
+        # Unique vocabulary preserving (frequency) order.
+        seen: set[str] = set()
+        vocab = [w for w in words if not (w in seen or seen.add(w))]  # type: ignore[func-returns-value]
 
-        if num_images < len(vocab):
-            print(
-                f"Warning: num_images ({num_images}) is less than vocabulary size ({len(vocab)}). "
-                "Some words won't be included."
-            )
+        if not vocab:
+            return [], []
 
-        # Calculate split sizes
         num_val = math.ceil(num_images * val_percent)
-        num_train = num_images - num_val
+        num_train = max(0, num_images - num_val)
 
-        # Extend wordlist if needed
-        extended_wordlist = words.copy()
-        while len(extended_wordlist) < num_images:
-            extended_wordlist.extend(words)
-        extended_wordlist = extended_wordlist[:num_images]
+        if num_images <= len(vocab):
+            selected = random.sample(vocab, num_images)
+        else:
+            pool = list(vocab) if ensure_coverage else []
+            while len(pool) < num_images:
+                # Sample with replacement so frequent words naturally recur.
+                pool.append(random.choice(vocab))
+            random.shuffle(pool)
+            selected = pool[:num_images]
 
-        # Shuffle for randomization
-        random.shuffle(extended_wordlist)
-
-        # Split into train and val
-        train_words = extended_wordlist[:num_train]
-        val_words = extended_wordlist[num_train : num_train + num_val]
-
-        # Ensure vocabulary coverage in both splits
-        def ensure_vocab_coverage(word_subset):
-            subset_vocab = set(word_subset)
-            missing = vocab - subset_vocab
-            if missing:
-                print(f"Adding {len(missing)} missing vocab words to subset for coverage.")
-                word_subset.extend(missing)
-            return word_subset
-
-        train_words = ensure_vocab_coverage(train_words)
-        val_words = ensure_vocab_coverage(val_words)
-
-        # Remove duplicates while preserving order
-        def unique_preserve_order(seq):
-            seen = set()
-            return [x for x in seq if x not in seen]
-
-        train_words = unique_preserve_order(train_words)
-        val_words = unique_preserve_order(val_words)
-
+        random.shuffle(selected)
+        train_words = selected[:num_train]
+        val_words = selected[num_train : num_train + num_val]
         return train_words, val_words

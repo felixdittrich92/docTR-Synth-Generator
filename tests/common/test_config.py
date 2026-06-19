@@ -1,0 +1,29 @@
+from generator.components import GenerationConfig
+
+
+def test_defaults_language_when_no_wordlist():
+    cfg = GenerationConfig(output_dir="ds", num_images=10)
+    # No wordlist and no explicit languages -> defaults to English.
+    assert cfg.wordlist_path is None
+    assert cfg.languages == ["en"]
+    assert cfg.auto_download_fonts is True
+
+
+def test_explicit_languages_preserved():
+    cfg = GenerationConfig(output_dir="ds", num_images=10, languages=["de", "ru"])
+    assert cfg.languages == ["de", "ru"]
+
+
+def test_wordlist_skips_language_default():
+    cfg = GenerationConfig(wordlist_path="words.txt", output_dir="ds", num_images=10)
+    # When a wordlist is given, language auto-defaulting is not applied.
+    assert cfg.languages is None
+
+
+def test_balancing_and_cache_defaults():
+    cfg = GenerationConfig(output_dir="ds", num_images=10)
+    assert cfg.language_balance == "balanced"
+    assert cfg.language_weights is None
+    assert cfg.min_char_coverage == 0
+    assert cfg.bg_cache_size == 16
+    assert cfg.supersample >= 1

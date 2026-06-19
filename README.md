@@ -5,7 +5,7 @@
 [![Pypi](https://img.shields.io/badge/pypi-v0.1.0-blue.svg)](https://pypi.org/project/docTR-Synth-Generator/)
 
 # docTR-Synth-Generator
-A tool to generate synthetic OCR text recognition datasets - made for docTR
+A tool to generate synthetic OCR datasets - made for docTR
 
 ## Features
 

@@ -121,13 +121,14 @@ class GenerationConfig:
         det_page_width_range (tuple[int, int]): Page width range in pixels.
         det_page_height_range (tuple[int, int]): Page height range in pixels.
         det_font_size_range (tuple[int, int]): Body font size range on a page.
-        det_words_per_page_range (tuple[int, int]): Target words placed per page.
-        det_max_words_per_page (int): Candidate words supplied per page (an upper
-            bound; only those that fit are placed).
+        det_max_words_per_page (int): Candidate words supplied per page. The page
+            is filled top-to-bottom with as many as fit, so this should be
+            generous enough to fill a full page at small font sizes.
         det_margin_ratio (float): Page margin as a fraction of min(width, height).
         det_block_gap_range (tuple[float, float]): Gap between paragraph blocks as
             a fraction of the line height.
-        det_max_blocks (int): Maximum paragraph blocks per page.
+        det_max_blocks (int): Safety cap on paragraph blocks per page (the real
+            limit is the available vertical space).
         det_heading_prob (float): Probability a block starts as a larger heading.
         det_plain_background_prob (float): Probability of using a clean generated
             paper background instead of a texture image. Texture photos that
@@ -224,11 +225,10 @@ class GenerationConfig:
     det_page_width_range: tuple[int, int] = (700, 1100)
     det_page_height_range: tuple[int, int] = (900, 1500)
     det_font_size_range: tuple[int, int] = (14, 32)
-    det_words_per_page_range: tuple[int, int] = (25, 130)
-    det_max_words_per_page: int = 200
+    det_max_words_per_page: int = 600
     det_margin_ratio: float = 0.06
     det_block_gap_range: tuple[float, float] = (0.5, 1.5)
-    det_max_blocks: int = 9
+    det_max_blocks: int = 60
     det_heading_prob: float = 0.3
     det_plain_background_prob: float = 0.4
     det_rotation_prob: float = 0.3

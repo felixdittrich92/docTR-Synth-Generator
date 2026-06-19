@@ -17,7 +17,7 @@ import numpy as np
 from PIL import Image, ImageEnhance
 
 from ..augmentations import AugmentationPipeline, RandomBlur, RandomGaussianNoise, RandomJpegCompression
-from .config import GenerationConfig
+from ..components.config import GenerationConfig
 from .text_renderer import TextStyle
 
 __all__ = [

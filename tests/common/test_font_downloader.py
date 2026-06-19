@@ -1,4 +1,5 @@
 import tempfile
+import urllib.error
 
 from generator.components import FontDownloader
 
@@ -45,3 +46,20 @@ def test_resolve_returns_none_when_no_coverage(monkeypatch, tiny_font):
 def test_resolve_empty_text():
     fd = FontDownloader(cache_dir=tempfile.mkdtemp(), enabled=True)
     assert fd.resolve("   ") is None
+
+
+def test_failed_download_is_cached_and_not_retried(monkeypatch):
+    # A missing file (404) must be attempted - and logged - only once, instead
+    # of re-requesting it for every word that needs it.
+    fd = FontDownloader(cache_dir=tempfile.mkdtemp(), enabled=True)
+    attempts = {"n": 0}
+
+    def boom(req, *a, **k):
+        attempts["n"] += 1
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    first = fd._download("notosans", "NotoSans[wght].ttf")
+    second = fd._download("notosans", "NotoSans[wght].ttf")
+    assert first is None and second is None
+    assert attempts["n"] == 1  # second call short-circuits via the negative cache

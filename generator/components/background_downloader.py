@@ -3,20 +3,6 @@
 # This program is licensed under the Apache License 2.0.
 # See LICENSE or go to <https://opensource.org/licenses/Apache-2.0> for full license details.
 
-"""Automatic download of background images.
-
-Mirrors :class:`FontDownloader` and :class:`CorpusDownloader`: instead of forcing
-the user to manually fetch and unzip a background pack, the curated set shipped
-with the project is downloaded on demand and cached. Supplying your own
-``bg_image_dir`` still takes precedence and skips downloading entirely (fully
-backward compatible).
-
-Images are pulled per-file from ``raw.githubusercontent.com`` (the same transport
-used for fonts and corpora). The default manifest is the project's own
-``resources/background_images`` set; point ``manifest_url`` at a plain-text list
-of filenames/URLs to use a different collection.
-"""
-
 import os
 import tempfile
 import threading

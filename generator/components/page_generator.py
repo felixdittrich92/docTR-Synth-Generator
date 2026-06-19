@@ -110,11 +110,15 @@ class PageGenerator:
         y = margin
 
         polygons: list[Polygon] = []
-        target_words = random.randint(*cfg.det_words_per_page_range)
         wi, n_words, placed, blocks = 0, len(words), 0, 0
         rtl = self._is_rtl(words)
+        max_blocks = max(1, cfg.det_max_blocks)
 
-        while y < height - margin and wi < n_words and placed < target_words and blocks < cfg.det_max_blocks:
+        # Fill the page top-to-bottom: stop only when the vertical space or the
+        # candidate words run out (the block cap is just a pathological-loop
+        # guard). Word *count* variety comes naturally from the per-block font
+        # size, not from an early word-count limit that left pages half-empty.
+        while y < height - margin and wi < n_words and blocks < max_blocks:
             blocks += 1
             base_size = random.randint(*cfg.det_font_size_range)
             heading = random.random() < cfg.det_heading_prob
@@ -127,10 +131,10 @@ class PageGenerator:
 
             line_height = int(font_size * random.uniform(1.15, 1.4))
             space = max(2, int(font_size * 0.33))
-            max_lines = 2 if heading else random.randint(1, 6)
+            max_lines = 2 if heading else random.randint(2, 8)
 
             for line_idx in range(max_lines):
-                if y + line_height > height - margin or wi >= n_words or placed >= target_words:
+                if y + line_height > height - margin or wi >= n_words:
                     break
                 indent = 0
                 if line_idx == 0 and not heading and random.random() < 0.25:
@@ -139,7 +143,7 @@ class PageGenerator:
                 cursor = (x_right - indent) if rtl else (x_left + indent)
                 line_has_word = False
 
-                while wi < n_words and placed < target_words:
+                while wi < n_words:
                     word = words[wi]
                     font_path = self.font_selector.get_font_for_text(word)
                     if not font_path:
@@ -211,7 +215,7 @@ class PageGenerator:
 
     @staticmethod
     def _paper_background(size: tuple[int, int]) -> Image.Image:
-        """A clean, subtly-shaded paper background (guaranteed text-free)."""
+        """A clean, subtly-shaded paper background."""
         width, height = size
         tone = random.randint(236, 252)
         arr = np.full((height, width, 3), float(tone), dtype=np.float32)

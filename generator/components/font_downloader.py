@@ -134,6 +134,9 @@ class FontDownloader:
         self.enabled = enabled
         # script -> resolved local path | None (negative results are cached too)
         self._resolved: dict[str, str | None] = {}
+        # family__filename of downloads known to fail (404 etc.), to avoid
+        # re-requesting - and re-logging - the same missing file for every word.
+        self._failed_downloads: set[str] = set()
         os.makedirs(self.cache_dir, exist_ok=True)
 
     @staticmethod
@@ -157,6 +160,9 @@ class FontDownloader:
         local_path = os.path.join(self.cache_dir, local_name)
         if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
             return local_path
+        # Already known to be missing/unavailable: skip the network and the log.
+        if local_name in self._failed_downloads:
+            return None
 
         url = f"{self.source_base_url}/ofl/{family}/{urllib.parse.quote(filename)}"
         try:
@@ -164,6 +170,7 @@ class FontDownloader:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = resp.read()
             if not data:
+                self._failed_downloads.add(local_name)
                 return None
             # Atomic write so concurrent workers never observe a partial file.
             fd, tmp = tempfile.mkstemp(dir=self.cache_dir, suffix=".part")
@@ -172,7 +179,9 @@ class FontDownloader:
             os.replace(tmp, local_path)
             return local_path
         except Exception as e:  # pragma: no cover - network dependent
-            print(f"FontDownloader: failed to fetch {url}: {e}")
+            # Remember the failure so it is attempted (and logged) only once.
+            self._failed_downloads.add(local_name)
+            print(f"FontDownloader: {family}/{filename} unavailable ({e}); will not retry.")
             return None
 
     @staticmethod

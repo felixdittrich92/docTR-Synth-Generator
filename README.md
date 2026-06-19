@@ -169,8 +169,9 @@ the recognition path, and lays words out in paragraph blocks with margins, line
 wrapping, occasional headings/indents, numbers and dates, and an optional small
 global page rotation (the polygons rotate with the page, giving rotated boxes
 usable with docTR's `use_polygons=True`). Tune layout with the `det_*` config
-fields (`det_page_*_range`, `det_font_size_range`, `det_words_per_page_range`,
-`det_max_blocks`, `det_rotation_*`, ...).
+fields (`det_page_*_range`, `det_font_size_range`, `det_max_words_per_page`,
+`det_max_blocks`, `det_rotation_*`, ...). Pages are filled top-to-bottom by the
+available vertical space, so word count varies naturally with font size.
 
 > **Backgrounds for detection:** only the words *you* place are labelled, so any
 > text already printed in a background photo becomes an unlabelled false
@@ -247,7 +248,7 @@ The test suite is fully offline - it builds a tiny in-memory font with
 fetched while testing. Run it with:
 
 ```bash
-make test      # pytest + coverage (fails under 70%)
+make test      # pytest + coverage
 make quality   # ruff + mypy
 make style     # auto-format and fix
 ```

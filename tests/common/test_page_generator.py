@@ -18,7 +18,6 @@ def _cfg(tiny_font_dir, **kw):
         det_page_width_range=(400, 400),
         det_page_height_range=(520, 520),
         det_font_size_range=(16, 16),
-        det_words_per_page_range=(10, 40),
         det_max_blocks=4,
         det_plain_background_prob=1.0,
         det_heading_prob=0.5,
@@ -43,6 +42,17 @@ def test_generate_page_returns_image_and_polygons(tiny_font_dir):
     for poly in polygons:
         assert len(poly) == 4
         assert all(len(point) == 2 for point in poly)
+
+
+def test_page_fills_most_of_its_height(tiny_font_dir):
+    # Regression: pages used to stop after a small word target, leaving the
+    # bottom ~2/3 empty. With enough candidate words the page should fill down
+    # to near the bottom margin.
+    cfg = _cfg(tiny_font_dir, det_max_blocks=60, det_font_size_range=(14, 14), det_heading_prob=0.0)
+    page, polygons = PageGenerator(cfg).generate_page(["word", "text", "page", "fill"] * 200)
+    height = page.height
+    lowest = max(pt[1] for poly in polygons for pt in poly)
+    assert lowest > 0.6 * height
 
 
 def test_polygons_within_page_bounds(tiny_font_dir):
@@ -104,7 +114,7 @@ def test_is_rtl_detection():
 def test_rtl_layout_places_words_from_the_right(tiny_font_dir, monkeypatch):
     # Force RTL so the latin tiny font can still exercise the right-to-left path:
     # in reading order the first word should sit further right than the second.
-    pg = PageGenerator(_cfg(tiny_font_dir, det_max_blocks=1, det_words_per_page_range=(4, 8)))
+    pg = PageGenerator(_cfg(tiny_font_dir, det_max_blocks=2))
     monkeypatch.setattr(pg, "_is_rtl", lambda words: True)
     _, polygons = pg.generate_page(["aa", "bb", "cc", "dd", "ee", "ff"])
     assert len(polygons) >= 2

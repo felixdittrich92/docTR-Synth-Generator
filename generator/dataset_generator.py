@@ -7,6 +7,7 @@ import json
 import math
 import multiprocessing as mp
 import random
+import threading
 import time
 from pathlib import Path
 from queue import Empty
@@ -295,40 +296,44 @@ class SyntheticDatasetGenerator:
             d.mkdir(parents=True, exist_ok=True)
         print(f"Output directories created: {train_dir}, {val_dir}")
 
-        def make_tasks(count: int, images_dir: Path, split: str) -> List[DetectionTask]:
-            tasks = []
+        def make_tasks(count: int, images_dir: Path, split: str):
+            # A generator so the (large) per-page candidate word lists are created
+            # just-in-time as they are fed to the queue, instead of all at once.
             for idx in range(count):
                 page_words = [rng.choice(pool) for _ in range(cfg.det_max_words_per_page)]
-                tasks.append(
-                    DetectionTask(
-                        words=page_words,
-                        save_path=str(images_dir / f"{idx:05d}.{ext}"),
-                        filename=f"{idx:05d}.{ext}",
-                        split=split,
-                    )
+                yield DetectionTask(
+                    words=page_words,
+                    save_path=str(images_dir / f"{idx:05d}.{ext}"),
+                    filename=f"{idx:05d}.{ext}",
+                    split=split,
                 )
-            return tasks
 
         print("Generating training pages...")
-        train_tasks = make_tasks(num_train, train_images_dir, "train")
-        train_success, train_labels = self._generate_pages_with_queue(train_tasks)
+        train_success, train_labels = self._generate_pages_with_queue(
+            make_tasks(num_train, train_images_dir, "train"), num_train
+        )
         with open(train_dir / "labels.json", "w", encoding="utf-8") as f:
             json.dump(train_labels, f, ensure_ascii=False, indent=2)
         print(f"Training labels saved to {train_dir / 'labels.json'}")
 
         print("Generating validation pages...")
-        val_tasks = make_tasks(num_val, val_images_dir, "val")
-        val_success, val_labels = self._generate_pages_with_queue(val_tasks)
+        val_success, val_labels = self._generate_pages_with_queue(make_tasks(num_val, val_images_dir, "val"), num_val)
         with open(val_dir / "labels.json", "w", encoding="utf-8") as f:
             json.dump(val_labels, f, ensure_ascii=False, indent=2)
         print(f"Validation labels saved to {val_dir / 'labels.json'}")
 
         print("Detection dataset generation completed!")
-        print(f"Training: {train_success}/{len(train_tasks)} pages generated successfully")
-        print(f"Validation: {val_success}/{len(val_tasks)} pages generated successfully")
+        print(f"Training: {train_success}/{num_train} pages generated successfully")
+        print(f"Validation: {val_success}/{num_val} pages generated successfully")
 
-    def _generate_pages_with_queue(self, tasks: List[DetectionTask]) -> Tuple[int, Dict[str, dict]]:
-        """Render detection pages with multiprocessing and collect polygon labels."""
+    def _generate_pages_with_queue(self, task_iter, total: int) -> Tuple[int, Dict[str, dict]]:
+        """Render detection pages with multiprocessing and collect polygon labels.
+
+        Tasks are fed from a background thread while results are collected
+        concurrently. Detection results are large (hundreds of polygons each), so
+        feeding everything up front before collecting could fill the result pipe
+        and dead-lock the workers; the feeder thread avoids that.
+        """
         task_queue: mp.Queue = mp.Queue(maxsize=self.config.queue_maxsize)
         result_queue: mp.Queue = mp.Queue()
 
@@ -341,17 +346,23 @@ class SyntheticDatasetGenerator:
             worker.start()
             workers.append(worker)
 
-        for task in tasks:
-            task_queue.put(task)
+        def feed():
+            for task in task_iter:
+                task_queue.put(task)
+            for _ in range(self.config.num_workers):
+                task_queue.put(None)  # poison pills
+
+        feeder = threading.Thread(target=feed, daemon=True)
+        feeder.start()
 
         completed = 0
         successful = 0
         labels: Dict[str, dict] = {}
         start_time = time.time()
 
-        while completed < len(tasks):
+        while completed < total:
             try:
-                filename, _split, dims, img_hash, polygons, success = result_queue.get(timeout=30)
+                filename, _split, dims, img_hash, polygons, success = result_queue.get(timeout=60)
                 completed += 1
                 if success:
                     successful += 1
@@ -360,20 +371,19 @@ class SyntheticDatasetGenerator:
                         "img_hash": img_hash,
                         "polygons": polygons,
                     }
-                if completed % 25 == 0 or completed == len(tasks):
+                if completed % 25 == 0 or completed == total:
                     elapsed = time.time() - start_time
                     rate = completed / elapsed if elapsed > 0 else 0
-                    eta = (len(tasks) - completed) / rate if rate > 0 else 0
+                    eta = (total - completed) / rate if rate > 0 else 0
                     print(
-                        f"Progress: {completed}/{len(tasks)} ({successful} successful) "
+                        f"Progress: {completed}/{total} ({successful} successful) "
                         f"Rate: {rate:.1f} pages/s ETA: {eta:.1f}s"
                     )
             except Empty:
                 print("Waiting for results...")
                 continue
 
-        for _ in range(self.config.num_workers):
-            task_queue.put(None)
+        feeder.join()
         for worker in workers:
             worker.join()
 

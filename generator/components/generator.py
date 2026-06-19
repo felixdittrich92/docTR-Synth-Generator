@@ -10,8 +10,8 @@ from queue import Empty
 import numpy as np
 from PIL import Image
 
+from ..components.config import GenerationConfig
 from .background_manager import BackgroundManager
-from .config import GenerationConfig
 from .font_selector import FontSelector
 from .text_renderer import TextRenderer, TextStyle
 from .text_styling import (
@@ -22,10 +22,6 @@ from .text_styling import (
 )
 
 __all__ = ["TextImageGenerator", "GenerationTask"]
-
-
-def _luminance(rgb) -> float:
-    return float(0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2])
 
 
 @dataclass

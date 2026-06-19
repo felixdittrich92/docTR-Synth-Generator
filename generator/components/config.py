@@ -71,7 +71,8 @@ class GenerationConfig:
         ink_color_jitter (float): Per-channel std-dev of ink colour jitter.
         colored_ink_prob (float): Probability of colourful (vs near-neutral) ink.
         outline_prob (float): Probability of a contrasting glyph outline.
-        outline_width_range (tuple[int, int]): Outline stroke width (supersampled px).
+        outline_width_frac_range (tuple[float, float]): Outline stroke width as a
+            fraction of the font size (proportional, like bold).
 
         # --- Text/background contrast ---
         min_contrast (float): Lower bound of ink-vs-background contrast [0, 1].
@@ -80,7 +81,9 @@ class GenerationConfig:
 
         # --- Glyph-space augmentation probabilities ---
         bold_prob (float): Probability of faux-bold glyphs.
-        bold_width_range (tuple[int, int]): Stroke width (supersampled px) for bold.
+        bold_width_frac_range (tuple[float, float]): Faux-bold stroke width as a
+            fraction of the font size (kept proportional so small text stays
+            readable instead of blobbing).
         rotation_prob (float): Probability of applying rotation.
         blur_prob (float): Probability of a glyph blur.
         perspective_prob (float): Probability of perspective distortion.
@@ -151,7 +154,7 @@ class GenerationConfig:
     ink_color_jitter: float = 12.0
     colored_ink_prob: float = 0.25
     outline_prob: float = 0.05
-    outline_width_range: tuple[int, int] = (2, 4)
+    outline_width_frac_range: tuple[float, float] = (0.02, 0.045)
 
     # Text/background contrast
     min_contrast: float = 0.45
@@ -160,7 +163,7 @@ class GenerationConfig:
 
     # Glyph-space augmentation probabilities
     bold_prob: float = 0.3
-    bold_width_range: tuple[int, int] = (1, 3)
+    bold_width_frac_range: tuple[float, float] = (0.03, 0.06)
     rotation_prob: float = 0.6
     blur_prob: float = 0.3
     perspective_prob: float = 0.5

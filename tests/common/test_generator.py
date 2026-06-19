@@ -87,7 +87,7 @@ def test_generate_image_none_without_font(tiny_font_dir, temp_image_dir):
 
 def test_generate_image_outline_path(tiny_font_dir, temp_image_dir):
     # outline_prob=1.0 forces the rarer two-tone re-render branch.
-    gen = _gen(tiny_font_dir, temp_image_dir, outline_prob=1.0, outline_width_range=(1, 1))
+    gen = _gen(tiny_font_dir, temp_image_dir, outline_prob=1.0, outline_width_frac_range=(0.05, 0.05))
     img = gen.generate_image("Test")
     assert isinstance(img, Image.Image)
     assert img.mode == "RGB"

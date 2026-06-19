@@ -80,14 +80,26 @@ class TextRenderer:
         return font
 
     def sample_style(self) -> tuple[int, int, int]:
-        """Sample the per-word font size and stroke widths (colour set later)."""
+        """Sample the per-word font size and stroke widths (colour set later).
+
+        Bold and outline stroke widths are a *fraction of the font size* rather
+        than an absolute pixel count. An absolute stroke that looks like normal
+        bold at a large size fills the counters and merges glyphs at a small
+        size, turning words into unreadable blobs; scaling with the font keeps
+        the weight legible across the whole ``font_size_range``.
+        """
         font_size = random.randint(*self.config.font_size_range)
+        fs_ss = font_size * self.supersample
+
         bold_width = 0
         if random.random() < self.config.bold_prob:
-            bold_width = random.randint(*self.config.bold_width_range) * self.supersample
+            frac = random.uniform(*self.config.bold_width_frac_range)
+            bold_width = max(1, round(fs_ss * frac))
+
         outline_width = 0
         if random.random() < self.config.outline_prob:
-            outline_width = random.randint(*self.config.outline_width_range) * self.supersample
+            frac = random.uniform(*self.config.outline_width_frac_range)
+            outline_width = max(1, round(fs_ss * frac))
         return font_size, bold_width, outline_width
 
     def measure_size(self, text: str, font_path: str, font_size: int) -> tuple[int, int]:

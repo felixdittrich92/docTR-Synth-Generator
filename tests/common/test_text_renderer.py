@@ -61,8 +61,31 @@ def test_render_styled_with_outline(tiny_font):
 
 
 def test_sample_style_ranges(tiny_font):
-    r = TextRenderer(_config(font_size_range=(15, 40), bold_prob=1.0, bold_width_range=(1, 1)))
+    r = TextRenderer(_config(font_size_range=(40, 40), bold_prob=1.0, bold_width_frac_range=(0.05, 0.05)))
     font_size, bold_width, outline_width = r.sample_style()
-    assert 15 <= font_size <= 40
-    assert bold_width == r.supersample  # 1 * supersample
+    assert font_size == 40
+    # 0.05 * (40 * supersample) = 0.05 * 120 = 6
+    assert bold_width == round(40 * r.supersample * 0.05)
     assert outline_width == 0
+
+
+def test_bold_width_is_proportional_to_font_size():
+    # The same bold fraction must yield a thinner stroke for small fonts than for
+    # large ones, so small text stays readable instead of blobbing.
+    small = TextRenderer(_config(font_size_range=(15, 15), bold_prob=1.0, bold_width_frac_range=(0.06, 0.06)))
+    large = TextRenderer(_config(font_size_range=(40, 40), bold_prob=1.0, bold_width_frac_range=(0.06, 0.06)))
+    _, bw_small, _ = small.sample_style()
+    _, bw_large, _ = large.sample_style()
+    assert bw_small < bw_large
+    # Stroke never exceeds the configured fraction of the (supersampled) glyph.
+    assert bw_small <= round(15 * small.supersample * 0.06)
+    assert bw_large <= round(40 * large.supersample * 0.06)
+
+
+def test_outline_width_is_proportional_and_bounded():
+    r = TextRenderer(
+        _config(font_size_range=(15, 15), bold_prob=0.0, outline_prob=1.0, outline_width_frac_range=(0.045, 0.045))
+    )
+    _, bold_width, outline_width = r.sample_style()
+    assert bold_width == 0
+    assert outline_width == max(1, round(15 * r.supersample * 0.045))

@@ -7,8 +7,6 @@
 # docTR-Synth-Generator
 A tool to generate synthetic OCR text recognition datasets - made for docTR
 
-# WORK IN PROGRESS
-
 ## Features
 
 - **Zero-config**: generate a dataset with nothing but an output directory - real
@@ -228,7 +226,7 @@ If you wish to cite please refer to the base project citation, feel free to use 
 
 ```bibtex
 @misc{docTR-Synth-Generator,
-    title={docTR-Synth-Generator: A tool to generate synthetic OCR text recognition datasets - made for docTR},
+    title={docTR-Synth-Generator: A tool to generate synthetic OCR text datasets - made for docTR},
     author={{Dittrich, Felix}},
     year={2026},
     publisher = {GitHub},

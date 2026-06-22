@@ -46,9 +46,16 @@ def test_generate_page_returns_image_and_polygons(tiny_font_dir):
 
 def test_page_fills_most_of_its_height(tiny_font_dir):
     # Regression: pages used to stop after a small word target, leaving the
-    # bottom ~2/3 empty. With enough candidate words the page should fill down
-    # to near the bottom margin.
-    cfg = _cfg(tiny_font_dir, det_max_blocks=60, det_font_size_range=(14, 14), det_heading_prob=0.0)
+    # bottom ~2/3 empty. With enough candidate words a dense layout should fill
+    # down to near the bottom margin. (Form/id_card layouts are intentionally
+    # sparse, so this guard pins the paragraph layout.)
+    cfg = _cfg(
+        tiny_font_dir,
+        det_layout="paragraph",
+        det_max_blocks=60,
+        det_font_size_range=(14, 14),
+        det_heading_prob=0.0,
+    )
     page, polygons = PageGenerator(cfg).generate_page(["word", "text", "page", "fill"] * 200)
     height = page.height
     lowest = max(pt[1] for poly in polygons for pt in poly)

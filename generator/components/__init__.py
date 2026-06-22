@@ -1,4 +1,5 @@
 from .vocabs import VOCABS
+from .vocab_coverage import LANGUAGE_TO_VOCAB, augment_words_for_coverage, resolve_target_vocab
 from .config import GenerationConfig
 from .generator import TextImageGenerator, GenerationTask
 from .font_selector import FontSelector
@@ -14,6 +15,9 @@ from .dataset_balancer import DatasetBalancer, BalanceResult
 
 __all__ = [
     "VOCABS",
+    "LANGUAGE_TO_VOCAB",
+    "resolve_target_vocab",
+    "augment_words_for_coverage",
     "GenerationConfig",
     "TextImageGenerator",
     "GenerationTask",

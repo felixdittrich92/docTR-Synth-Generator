@@ -44,3 +44,11 @@ def test_background_download_defaults():
     assert cfg.auto_download_backgrounds is True
     assert cfg.bg_image_dir is None
     assert cfg.background_cache_dir is None
+
+
+def test_vocab_coverage_and_layout_defaults():
+    cfg = GenerationConfig(output_dir="ds", num_images=10)
+    assert cfg.ensure_vocab_coverage is True
+    assert cfg.target_vocab is None
+    assert cfg.vocab_coverage_min_count >= 1
+    assert cfg.det_layout == "mixed"

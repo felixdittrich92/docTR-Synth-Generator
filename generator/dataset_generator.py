@@ -25,7 +25,8 @@ from .components import (
     apply_casing_variants,
     generate_numeric_tokens,
 )
-from .components.background_downloader import BackgroundDownloader
+from .components import BackgroundDownloader
+from .components.vocab_coverage import augment_words_for_coverage, resolve_target_vocab
 
 __all__ = ["SyntheticDatasetGenerator", "GenerationConfig"]
 
@@ -81,7 +82,11 @@ class SyntheticDatasetGenerator:
         if cfg.wordlist_path is not None:
             words = DatasetSplitter.load_vocabulary(cfg.wordlist_path)
             print(f"Loaded {len(words)} words from wordlist '{cfg.wordlist_path}'.")
-            return DatasetSplitter.prepare_splits(words, cfg.num_images, cfg.val_percent, ensure_coverage=True)
+            train, val = DatasetSplitter.prepare_splits(words, cfg.num_images, cfg.val_percent, ensure_coverage=True)
+            target = self._coverage_target([])  # only an explicit target_vocab applies here
+            if target:
+                train, val = self._inject_coverage(train, val, target)
+            return train, val
 
         languages = cfg.languages or ["en"]
         cache_dir = cfg.corpus_cache_dir or ".corpus_cache"
@@ -129,7 +134,55 @@ class SyntheticDatasetGenerator:
             min_char_coverage=cfg.min_char_coverage,
             report=cfg.print_balance_report,
         )
-        return result.train, result.val
+        train, val = result.train, result.val
+        # Hard per-split coverage guarantee: append synthesised tokens so train
+        # and val each contain every renderable vocab character. Done after the
+        # split (not via the balancer's stratified top-up) so a rare character
+        # can never end up in only one split.
+        target = self._coverage_target(languages)
+        if target:
+            train, val = self._inject_coverage(train, val, target)
+        return train, val
+
+    def _coverage_target(self, languages: list[str]) -> set[str] | None:
+        """Union of vocab characters to guarantee, or None when disabled/unknown."""
+        cfg = self.config
+        if not cfg.ensure_vocab_coverage:
+            return None
+        chars: set[str] = set()
+        if cfg.target_vocab:
+            explicit = resolve_target_vocab(None, cfg.target_vocab)
+            if explicit:
+                chars |= explicit
+        else:
+            for lang in languages:
+                resolved = resolve_target_vocab(lang, None)
+                if resolved:
+                    chars |= resolved
+        return chars or None
+
+    def _inject_coverage(self, train: list[str], val: list[str], target: set[str]) -> tuple[list[str], list[str]]:
+        """Ensure both splits cover ``target`` by appending synthesised tokens.
+
+        Characters that no available font can render (e.g. ``฿`` for a Latin-script
+        language) will still be skipped at render time - that is a font limitation,
+        not a logic gap.
+        """
+        cfg = self.config
+        seed = cfg.corpus_seed
+        train, n_train, miss_train = augment_words_for_coverage(
+            train, target, min_count=cfg.vocab_coverage_min_count, seed=seed
+        )
+        # Val only needs presence (min_count 1) so it stays small.
+        val, n_val, _ = augment_words_for_coverage(
+            val, target, min_count=1, seed=(seed + 1 if seed is not None else None)
+        )
+        if n_train or n_val:
+            print(
+                f"Vocab coverage: {miss_train} char(s) under-represented in train -> "
+                f"added {n_train} train / {n_val} val coverage tokens."
+            )
+        return train, val
 
     def generate_dataset(self):
         """Generate the complete dataset with queue-based multiprocessing"""

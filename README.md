@@ -131,6 +131,38 @@ generation (per-language train/val counts, train/val overlap, distinct/rare
 characters, word-length statistics); silence it with
 `print_balance_report=False`.
 
+## Vocabulary coverage (recognition)
+
+A recognition model is trained against a fixed character set (docTR's `VOCABS`).
+Real frequency corpora rarely contain *every* character of that set - rare
+accented capitals (`ẞ`), currency signs, some punctuation - so a model trained
+only on downloaded words never sees them. With `ensure_vocab_coverage=True`
+(the default), each language is mapped to its docTR vocab and extra word-like
+tokens are synthesised so **every renderable vocab character appears in both the
+train and val splits**:
+
+```python
+config = GenerationConfig(
+    output_dir="dataset",
+    num_images=50000,
+    languages=["de"],  # mapped to the "german" vocab automatically
+    ensure_vocab_coverage=True,  # default
+    vocab_coverage_min_count=3,  # each vocab char appears in >= N train samples
+)
+```
+
+- `target_vocab` overrides the per-language mapping - pass a `VOCABS` key
+  (e.g. `"german"`) or a literal string of characters to cover. It also enables
+  coverage when you supply your own `wordlist_path`.
+- Coverage is enforced **after** the train/val split, so a rare character can
+  never land in only one split. This makes `num_images` a *floor*: a small,
+  bounded number of coverage samples (proportional to the vocab size, not the
+  dataset) is appended on top.
+- Languages with no fixed small vocab (CJK) are skipped automatically.
+- A character that **no available font can render** (e.g. `฿` inside a
+  Latin-script vocab) is the one case that cannot be covered - that is a font
+  limitation, reported in the log, not a logic gap.
+
 ## Detection datasets
 
 Set `task="detection"` to generate document-like **pages** with a 4-point
@@ -163,13 +195,33 @@ format (absolute pixel coordinates):
 ```
 
 It reuses the same fonts, ink styling, contrast, backgrounds and degradations as
-the recognition path, and lays words out in paragraph blocks with margins, line
-wrapping, occasional headings/indents, numbers and dates, and an optional small
-global page rotation (the polygons rotate with the page, giving rotated boxes
-usable with docTR's `use_polygons=True`). Tune layout with the `det_*` config
-fields (`det_page_*_range`, `det_font_size_range`, `det_max_words_per_page`,
-`det_max_blocks`, `det_rotation_*`, ...). Pages are filled top-to-bottom by the
-available vertical space, so word count varies naturally with font size.
+the recognition path. Pages are filled top-to-bottom by the available vertical
+space (word count varies naturally with font size), and words are recycled as
+needed so a page always fills regardless of how many candidate words it is given.
+
+### Real-world layouts
+
+To better mimic real documents, the layout is chosen per page via `det_layout`:
+
+- `"paragraph"` - multi-block running text with headings and indents.
+- `"newspaper"` - a full-width masthead headline (with an optional sub-deck)
+  plus several narrow columns of small, tightly-leaded body text and occasional
+  column sub-headings, giving dense newsprint (~500-1100 words on an A4-ish page).
+  Tune density with `det_newspaper_columns_range` (default `(3, 6)`, clamped to
+  the page width), `det_newspaper_font_size_range` (default `(9, 15)`) and
+  `det_newspaper_line_spacing_range` (default `(1.05, 1.2)`).
+- `"form"` - a title followed by `Label:` / value rows with field underlines.
+- `"id_card"` - a card with a photo placeholder, labelled fields and two
+  MRZ-style lines along the bottom.
+- `"mixed"` (default) - a weighted blend of the above; tune via
+  `det_layout_weights` (e.g. `{"paragraph": 0.4, "newspaper": 0.25, "form": 0.2,
+  "id_card": 0.15}`).
+
+Forms and ID cards always render on clean generated paper. All layouts emit the
+same per-word polygons, and the optional small global page rotation
+(`det_rotation_*`) rotates the polygons with the page for use with docTR's
+`use_polygons=True`. Other layout knobs: `det_page_*_range`, `det_font_size_range`,
+`det_max_blocks`, `det_margin_ratio`, `det_heading_prob`.
 
 > **Backgrounds for detection:** only the words *you* place are labelled, so any
 > text already printed in a background photo becomes an unlabelled false

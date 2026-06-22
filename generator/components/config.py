@@ -64,6 +64,15 @@ class GenerationConfig:
         min_char_coverage (int): If > 0, ensure each character appears at least
             this many times across the dataset (best-effort, bounded).
         print_balance_report (bool): Print a summary of the resulting distribution.
+        ensure_vocab_coverage (bool): For recognition, synthesise extra word-like
+            tokens so every character of the target language vocab (docTR
+            ``VOCABS``) appears, even when the real corpus lacks it. Default True;
+            a no-op for languages with no fixed small vocab (e.g. CJK).
+        target_vocab (str | None): Override the vocab to cover - a ``VOCABS`` key
+            (e.g. ``"german"``) or a literal string of characters. Applies to all
+            languages when set; otherwise each language maps to its own vocab.
+        vocab_coverage_min_count (int): Minimum samples each vocab character must
+            appear in (drives both synthesis and the final coverage top-up).
 
         # --- Automatic font downloading ---
         auto_download_fonts (bool): Download a matching open-source font when no
@@ -127,6 +136,16 @@ class GenerationConfig:
         det_margin_ratio (float): Page margin as a fraction of min(width, height).
         det_block_gap_range (tuple[float, float]): Gap between paragraph blocks as
             a fraction of the line height.
+        det_layout (str): Page layout for detection: "mixed" (default, a
+            weighted blend), "paragraph", "newspaper" (dense multi-column),
+            "form" (label/value rows) or "id_card" (card with fields + photo).
+        det_layout_weights (dict[str, float] | None): Weights for "mixed".
+        det_newspaper_columns_range (tuple[int, int]): Min/max column count for
+            newspaper pages (more columns -> denser). Clamped to the page width.
+        det_newspaper_font_size_range (tuple[int, int]): Body text size for
+            newspaper columns - small by default for dense newsprint.
+        det_newspaper_line_spacing_range (tuple[float, float]): Line-height
+            multiplier for newspaper body text (tight by default).
         det_max_blocks (int): Safety cap on paragraph blocks per page (the real
             limit is the available vertical space).
         det_heading_prob (float): Probability a block starts as a larger heading.
@@ -176,6 +195,11 @@ class GenerationConfig:
     min_char_coverage: int = 0
     print_balance_report: bool = True
 
+    # Vocabulary coverage (recognition)
+    ensure_vocab_coverage: bool = True
+    target_vocab: str | None = None
+    vocab_coverage_min_count: int = 3
+
     # Automatic font downloading
     auto_download_fonts: bool = True
     font_cache_dir: str | None = None
@@ -198,9 +222,9 @@ class GenerationConfig:
     bold_prob: float = 0.3
     bold_width_frac_range: tuple[float, float] = (0.03, 0.06)
     rotation_prob: float = 0.6
-    blur_prob: float = 0.3
-    perspective_prob: float = 0.5
-    pixel_dropout_prob: float = 0.2
+    blur_prob: float = 0.2
+    perspective_prob: float = 0.3
+    pixel_dropout_prob: float = 0.15
 
     # Glyph-space augmentation parameters
     rotation_range: tuple[float, float] = (-2, 2)
@@ -209,11 +233,11 @@ class GenerationConfig:
     pixel_dropout_range: tuple[float, float] = (0.1, 0.2)
 
     # Image-space (post-composite) degradations
-    final_blur_prob: float = 0.25
+    final_blur_prob: float = 0.15
     final_blur_radius_range: tuple[float, float] = (0.3, 1.2)
-    noise_prob: float = 0.5
+    noise_prob: float = 0.25
     noise_std_range: tuple[float, float] = (2.0, 12.0)
-    jpeg_prob: float = 0.6
+    jpeg_prob: float = 0.3
     jpeg_quality_range: tuple[int, int] = (35, 92)
     brightness_jitter: float = 0.12
     contrast_jitter: float = 0.12
@@ -228,6 +252,13 @@ class GenerationConfig:
     det_max_words_per_page: int = 600
     det_margin_ratio: float = 0.06
     det_block_gap_range: tuple[float, float] = (0.5, 1.5)
+    det_layout: str = "mixed"
+    det_layout_weights: dict[str, float] | None = None
+    # Newspaper density controls (denser = more/narrower columns, smaller body
+    # text, tighter line spacing).
+    det_newspaper_columns_range: tuple[int, int] = (3, 6)
+    det_newspaper_font_size_range: tuple[int, int] = (9, 15)
+    det_newspaper_line_spacing_range: tuple[float, float] = (1.05, 1.2)
     det_max_blocks: int = 60
     det_heading_prob: float = 0.3
     det_plain_background_prob: float = 0.4

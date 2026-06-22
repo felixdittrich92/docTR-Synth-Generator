@@ -121,3 +121,50 @@ def test_rtl_layout_places_words_from_the_right(tiny_font_dir, monkeypatch):
     x_first = polygons[0][0][0]
     x_second = polygons[1][0][0]
     assert x_first > x_second
+
+
+def test_choose_layout_respects_explicit(tiny_font_dir):
+    for layout in ("paragraph", "newspaper", "form", "id_card"):
+        assert PageGenerator(_cfg(tiny_font_dir, det_layout=layout))._choose_layout() == layout
+
+
+def test_each_layout_produces_valid_in_bounds_polygons(tiny_font_dir):
+    for layout in ("paragraph", "newspaper", "form", "id_card"):
+        page, polygons = PageGenerator(_cfg(tiny_font_dir, det_layout=layout, det_rotation_prob=0.0)).generate_page(
+            WORDS
+        )
+        assert len(polygons) > 0, layout
+        w, h = page.size
+        for poly in polygons:
+            assert len(poly) == 4
+            for x, y in poly:
+                assert 0 <= x <= w and 0 <= y <= h, layout
+
+
+def test_paragraph_fills_vertically_with_few_candidates(tiny_font_dir):
+    # Word recycling must fill the page even from a handful of candidates.
+    page, polygons = PageGenerator(
+        _cfg(
+            tiny_font_dir,
+            det_layout="paragraph",
+            det_page_height_range=(800, 800),
+            det_font_size_range=(14, 14),
+            det_max_blocks=40,
+            det_rotation_prob=0.0,
+        )
+    ).generate_page(["alpha", "beta", "gamma", "delta"])
+    assert len(polygons) > 30
+    lowest = max(pt[1] for poly in polygons for pt in poly)
+    assert lowest > 0.6 * 800
+
+
+def test_newspaper_is_dense_and_denser_than_paragraph(tiny_font_dir):
+    import random as _r
+
+    base = dict(det_page_width_range=(640, 640), det_page_height_range=(860, 860), det_rotation_prob=0.0)
+    _r.seed(0)
+    news = PageGenerator(_cfg(tiny_font_dir, det_layout="newspaper", **base)).generate_page(WORDS)[1]
+    _r.seed(0)
+    para = PageGenerator(_cfg(tiny_font_dir, det_layout="paragraph", **base)).generate_page(WORDS)[1]
+    assert len(news) > 200  # genuinely dense newsprint
+    assert len(news) > len(para)  # denser than running paragraphs

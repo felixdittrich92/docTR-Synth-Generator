@@ -30,6 +30,7 @@ def test_prepare_train_val_downloads_balanced_corpus(monkeypatch):
     )
 
     cfg = GenerationConfig(
+        ensure_vocab_coverage=False,
         output_dir="ds",
         num_images=200,
         languages=["en", "de"],
@@ -66,6 +67,7 @@ def test_resolve_word_pool_from_corpus(monkeypatch):
         lambda self, languages, words_per_language=50000: [f"word{i}" for i in range(50)],
     )
     cfg = GenerationConfig(
+        ensure_vocab_coverage=False,
         task="detection",
         output_dir="ds",
         num_images=3,
@@ -84,6 +86,7 @@ def test_resolve_word_pool_from_corpus(monkeypatch):
         lambda self, lang: fake_words,
     )
     cfg = GenerationConfig(
+        ensure_vocab_coverage=False,
         output_dir="ds",
         num_images=100,
         languages=["en"],

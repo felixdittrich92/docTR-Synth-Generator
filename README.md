@@ -165,9 +165,12 @@ config = GenerationConfig(
   only ever placed in a Hebrew token, etc.), so each renders with one font. When
   several languages are generated together, coverage is computed over the union
   of their vocabs but tokens are never mixed across scripts.
-- Combining marks (Hebrew niqqud, Arabic harakat, Devanagari/Thai/Indic vowel
-  signs, ...) are always attached to a base letter of the same script, so they
-  form valid clusters instead of rendering alone on a dotted circle.
+- Coverage prefers repeating **real corpus words** that contain a rare
+  character, so diacritic combinations are linguistically attested. Synthesis
+  is only a fallback for characters absent from the corpus (rare punctuation,
+  currency, capitals in a lower-cased corpus, or marks like Hebrew niqqud that
+  real text omits) - and even then a combining mark is inserted into a real
+  same-script word after a base letter, never rendered alone on a dotted circle.
 - A character that **no available font can render** (e.g. `฿` inside a
   Latin-script vocab) is the one case that cannot be covered - that is a font
   limitation, reported in the log, not a logic gap.
@@ -213,15 +216,18 @@ needed so a page always fills regardless of how many candidate words it is given
 To better mimic real documents, the layout is chosen per page via `det_layout`:
 
 - `"paragraph"` - multi-block running text with headings and indents.
-- `"newspaper"` - a full-width masthead headline (with an optional sub-deck)
-  plus several narrow columns of small, tightly-leaded body text and occasional
-  column sub-headings, giving dense newsprint (~500-1100 words on an A4-ish page).
-  Tune density with `det_newspaper_columns_range` (default `(3, 6)`, clamped to
-  the page width), `det_newspaper_font_size_range` (default `(9, 15)`) and
-  `det_newspaper_line_spacing_range` (default `(1.05, 1.2)`).
-- `"form"` - a title followed by `Label:` / value rows with field underlines.
-- `"id_card"` - a card with a photo placeholder, labelled fields and two
-  MRZ-style lines along the bottom.
+- `"newspaper"` - a full-width masthead with a double rule and a dateline, then
+  several narrow columns separated by vertical rules, each with article
+  headlines, bylines and small, tightly-leaded body text (~500-1100 words on an
+  A4-ish page). Tune density with `det_newspaper_columns_range` (default
+  `(3, 6)`, clamped to the page width), `det_newspaper_font_size_range` (default
+  `(9, 15)`) and `det_newspaper_line_spacing_range` (default `(1.05, 1.2)`).
+- `"form"` - a title with a header rule, then `Label:` / value rows with either
+  underlines or boxed fields, shaded section-header bars, and occasional
+  checkbox rows.
+- `"id_card"` - a card with a coloured issuing-authority header band (emblem +
+  light title text), a photo placeholder, labelled field rows, a signature line
+  and MRZ-style lines. Mirrors fully for right-to-left scripts.
 - `"mixed"` (default) - a weighted blend of the above; tune via
   `det_layout_weights` (e.g. `{"paragraph": 0.4, "newspaper": 0.25, "form": 0.2,
   "id_card": 0.15}`).

@@ -91,3 +91,16 @@ def test_combining_marks_always_follow_a_base_letter():
                 assert seen_letter, f"mark {ch!r} not preceded by a base letter in {token!r}"
             if cat.startswith("L"):
                 seen_letter = True
+
+
+def test_present_rare_chars_are_covered_with_real_words():
+    # A rare-but-present character must be topped up by repeating a REAL word
+    # (an attested combination), not a synthesised token. Absent chars are from
+    # another script so their synthesised tokens never share letters.
+    words = ["naive", "cafe", "cafe", "cafe"]  # 'n','i','v' appear once (rare)
+    target = set("niv") | set("αβγ")  # Latin rare-present + Greek absent
+    augmented, _, _ = augment_words_for_coverage(words, target, min_count=3, seed=0)
+    added = augmented[len(words) :]
+    latin_tokens = [t for t in added if any("a" <= c <= "z" for c in t)]
+    assert latin_tokens
+    assert all(t in words for t in latin_tokens)  # covered by repeating real words

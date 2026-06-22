@@ -241,17 +241,35 @@ def augment_words_for_coverage(
     # synthesis; rely on the corpus for those instead of bloating the dataset.
     oversized = {s for s, chars in script_letters.items() if len(chars) > _LARGE_SCRIPT_THRESHOLD}
 
+    # Real words that already contain an under-represented character give
+    # linguistically-attested clusters (correct diacritic combinations, real
+    # orthography). Prefer repeating those over synthesising; synthesis is then
+    # only a fallback for characters genuinely absent from the corpus (rare
+    # punctuation, currency, capitals in a lower-cased corpus, ...).
+    under_present = {c for c in target_chars if 0 < counts.get(c, 0) < min_count and _script_of(c) not in oversized}
+    real_with: dict[str, list[str]] = defaultdict(list)
+    if under_present:
+        for word in words:
+            if not word:
+                continue
+            for char in set(word) & under_present:
+                real_with[char].append(word)
+
     extra: list[str] = []
     deficient = 0
     for char in sorted(target_chars):
         if counts.get(char, 0) >= min_count or _script_of(char) in oversized:
             continue
         deficient += 1
+        attested = real_with.get(char)
         attempts = 0
         # Cap attempts per char so a stubborn case can never loop forever.
         while counts.get(char, 0) < min_count and attempts < min_count * 4 + 4:
             attempts += 1
-            token = _make_token(char, script_words, script_base_letters, rng)
+            if attested:
+                token = rng.choice(attested)  # real, attested word - correct combinations
+            else:
+                token = _make_token(char, script_words, script_base_letters, rng)
             if not token:
                 break  # cannot place this character validly (no same-script base letter)
             extra.append(token)

@@ -47,3 +47,47 @@ def test_augment_empty_target_is_noop():
     augmented, added, missing = augment_words_for_coverage(["x"], set(), min_count=3)
     assert added == 0 and missing == 0
     assert augmented == ["x"]
+
+
+def test_synthesized_tokens_are_single_script():
+    from generator.components.vocab_coverage import _script_of
+
+    target = set()
+    for lang in ("en", "ru", "el", "he", "ar", "th", "hi"):
+        resolved = resolve_target_vocab(lang, None)
+        if resolved:
+            target |= resolved
+    base = ["hello", "привет", "γειά", "שלום", "سلام", "สวัสดี", "नमस्ते"]
+    augmented, _, _ = augment_words_for_coverage(base, target, min_count=2, seed=0)
+    for token in augmented[len(base) :]:
+        scripts = {s for s in (_script_of(c) for c in token) if s != "COMMON"}
+        assert len(scripts) <= 1, (token, scripts)  # never mix scripts in one token
+
+
+def test_large_scripts_left_to_corpus():
+    # Japanese includes thousands of CJK ideographs - synthesis must not try to
+    # cover them all (that would bloat the dataset); only its small sub-scripts.
+    target = resolve_target_vocab("ja", None)
+    _, added, _ = augment_words_for_coverage([], target, min_count=3, seed=0)
+    assert added < 2000
+
+
+def test_combining_marks_always_follow_a_base_letter():
+    import unicodedata
+
+    target = set()
+    for lang in ("ar", "he", "hi", "th", "bn", "ta", "te", "ml", "kn"):
+        resolved = resolve_target_vocab(lang, None)
+        if resolved:
+            target |= resolved
+    base = ["سلام", "שלום", "नमस्ते", "สวัสดี", "আমি", "தமிழ்"]
+    augmented, _, _ = augment_words_for_coverage(base, target, min_count=3, seed=0)
+    for token in augmented[len(base) :]:
+        assert token  # no empty tokens
+        seen_letter = False
+        for ch in token:
+            cat = unicodedata.category(ch)
+            if cat.startswith("M"):
+                assert seen_letter, f"mark {ch!r} not preceded by a base letter in {token!r}"
+            if cat.startswith("L"):
+                seen_letter = True

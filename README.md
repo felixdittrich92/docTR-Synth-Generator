@@ -158,7 +158,16 @@ config = GenerationConfig(
   never land in only one split. This makes `num_images` a *floor*: a small,
   bounded number of coverage samples (proportional to the vocab size, not the
   dataset) is appended on top.
-- Languages with no fixed small vocab (CJK) are skipped automatically.
+- Languages with no fixed small vocab (CJK) are skipped automatically, and very
+  large scripts (thousands of CJK ideographs / Hangul syllables) are left to the
+  real corpus rather than synthesised.
+- Every synthesised token stays within a single script (a Hebrew character is
+  only ever placed in a Hebrew token, etc.), so each renders with one font. When
+  several languages are generated together, coverage is computed over the union
+  of their vocabs but tokens are never mixed across scripts.
+- Combining marks (Hebrew niqqud, Arabic harakat, Devanagari/Thai/Indic vowel
+  signs, ...) are always attached to a base letter of the same script, so they
+  form valid clusters instead of rendering alone on a dotted circle.
 - A character that **no available font can render** (e.g. `฿` inside a
   Latin-script vocab) is the one case that cannot be covered - that is a font
   limitation, reported in the log, not a logic gap.

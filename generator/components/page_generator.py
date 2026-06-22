@@ -160,8 +160,10 @@ class PageGenerator:
         if bbox:
             left, top, right, bottom = bbox
             polygons.append([
-                [px + left, py + top], [px + right, py + top],
-                [px + right, py + bottom], [px + left, py + bottom],
+                [px + left, py + top],
+                [px + right, py + top],
+                [px + right, py + bottom],
+                [px + left, py + bottom],
             ])
             return True
         return False
@@ -175,8 +177,20 @@ class PageGenerator:
         self._emit(page, coverage, style, paste_x, y, polygons)
         return coverage.width
 
-    def _fill_box(self, page, box, take_word, polygons, font_size, style, bold_width, rtl,
-                  max_lines=10**9, first_indent=0, line_spacing=(1.15, 1.4)) -> int:
+    def _fill_box(
+        self,
+        page,
+        box,
+        take_word,
+        polygons,
+        font_size,
+        style,
+        bold_width,
+        rtl,
+        max_lines=10**9,
+        first_indent=0,
+        line_spacing=(1.15, 1.4),
+    ) -> int:
         """Fill a rectangular box with wrapped text; return the y reached."""
         bx0, by0, bx1, by1 = box
         line_height = max(font_size + 1, int(font_size * random.uniform(*line_spacing)))
@@ -223,8 +237,9 @@ class PageGenerator:
             style = self._style_at(page, bx0, y, 240, font_size * 2, bold_width)
             indent = random.randint(0, int((bx1 - bx0) * 0.08)) if (not heading and random.random() < 0.25) else 0
             max_lines = 2 if heading else random.randint(2, 8)
-            y = self._fill_box(page, (bx0, y, bx1, by1), take_word, polygons,
-                               font_size, style, bold_width, rtl, max_lines, indent)
+            y = self._fill_box(
+                page, (bx0, y, bx1, by1), take_word, polygons, font_size, style, bold_width, rtl, max_lines, indent
+            )
             y += int(font_size * random.uniform(*cfg.det_block_gap_range))
 
     def _layout_newspaper(self, page, area, take_word, rtl, polygons) -> None:
@@ -236,8 +251,18 @@ class PageGenerator:
             hfs = int(random.randint(*cfg.det_font_size_range) * random.uniform(2.0, 3.2))
             hbw = self._heading_bold(hfs)
             hstyle = self._style_at(page, bx0, y, bx1 - bx0, hfs * 2, hbw)
-            y = self._fill_box(page, (bx0, y, bx1, by1), take_word, polygons,
-                               hfs, hstyle, hbw, rtl, max_lines=random.randint(1, 2), line_spacing=(1.05, 1.2))
+            y = self._fill_box(
+                page,
+                (bx0, y, bx1, by1),
+                take_word,
+                polygons,
+                hfs,
+                hstyle,
+                hbw,
+                rtl,
+                max_lines=random.randint(1, 2),
+                line_spacing=(1.05, 1.2),
+            )
             y += int(hfs * 0.3)
             if random.random() < 0.5:  # sub-deck under the headline
                 dfs = max(cfg.det_newspaper_font_size_range[1], int(hfs * 0.4))
@@ -263,16 +288,34 @@ class PageGenerator:
                     font_size = int(random.randint(*cfg.det_newspaper_font_size_range) * random.uniform(1.4, 1.8))
                     bold_width = self._heading_bold(font_size)
                     style = self._style_at(page, cx0, cy, col_w, font_size * 2, bold_width)
-                    cy = self._fill_box(page, (cx0, cy, cx1, by1), take_word, polygons,
-                                        font_size, style, bold_width, rtl, max_lines=random.randint(1, 2),
-                                        line_spacing=(1.1, 1.25))
+                    cy = self._fill_box(
+                        page,
+                        (cx0, cy, cx1, by1),
+                        take_word,
+                        polygons,
+                        font_size,
+                        style,
+                        bold_width,
+                        rtl,
+                        max_lines=random.randint(1, 2),
+                        line_spacing=(1.1, 1.25),
+                    )
                 else:
                     font_size = random.randint(*cfg.det_newspaper_font_size_range)
                     bold_width = self._maybe_bold(font_size)
                     style = self._style_at(page, cx0, cy, col_w, font_size * 2, bold_width)
-                    cy = self._fill_box(page, (cx0, cy, cx1, by1), take_word, polygons,
-                                        font_size, style, bold_width, rtl, max_lines=random.randint(5, 16),
-                                        line_spacing=spacing)
+                    cy = self._fill_box(
+                        page,
+                        (cx0, cy, cx1, by1),
+                        take_word,
+                        polygons,
+                        font_size,
+                        style,
+                        bold_width,
+                        rtl,
+                        max_lines=random.randint(5, 16),
+                        line_spacing=spacing,
+                    )
                 cy += int(font_size * random.uniform(0.2, 0.5))
 
     def _layout_form(self, page, area, take_word, rtl, polygons) -> None:
@@ -282,8 +325,9 @@ class PageGenerator:
         # Title.
         tfs = int(random.randint(*self.config.det_font_size_range) * random.uniform(1.6, 2.2))
         tstyle = self._style_at(page, bx0, y, bx1 - bx0, tfs * 2, self._heading_bold(tfs))
-        y = self._fill_box(page, (bx0, y, bx1, by1), take_word, polygons,
-                           tfs, tstyle, self._heading_bold(tfs), rtl, max_lines=1)
+        y = self._fill_box(
+            page, (bx0, y, bx1, by1), take_word, polygons, tfs, tstyle, self._heading_bold(tfs), rtl, max_lines=1
+        )
         y += int(tfs * 0.7)
 
         label_col = int((bx1 - bx0) * random.uniform(0.28, 0.42))
@@ -295,8 +339,17 @@ class PageGenerator:
             if random.random() < 0.12:  # section header
                 sfs = int(font_size * 1.25)
                 sstyle = self._style_at(page, bx0, y, bx1 - bx0, sfs * 2, self._heading_bold(sfs))
-                self._fill_box(page, (bx0, y, bx1, y + sfs * 1.5), take_word, polygons,
-                               sfs, sstyle, self._heading_bold(sfs), rtl, max_lines=1)
+                self._fill_box(
+                    page,
+                    (bx0, y, bx1, y + sfs * 1.5),
+                    take_word,
+                    polygons,
+                    sfs,
+                    sstyle,
+                    self._heading_bold(sfs),
+                    rtl,
+                    max_lines=1,
+                )
                 y += row_h
                 continue
             # "Label:" + value, mirrored for RTL.
@@ -328,15 +381,29 @@ class PageGenerator:
         cy0 = by0 + int(ah * random.uniform(0.05, 0.18))
         cx1, cy1 = cx0 + card_w, cy0 + card_h
         tone = random.randint(222, 248)
-        draw.rounded_rectangle((cx0, cy0, cx1, cy1), radius=int(card_h * 0.06),
-                               fill=(tone, tone, max(0, tone - 6)), outline=(140, 145, 160), width=2)
+        draw.rounded_rectangle(
+            (cx0, cy0, cx1, cy1),
+            radius=int(card_h * 0.06),
+            fill=(tone, tone, max(0, tone - 6)),
+            outline=(140, 145, 160),
+            width=2,
+        )
         pad = int(card_h * 0.08)
 
         # Title line.
         tfs = max(12, int(card_h * 0.1))
         tstyle = self._style_at(page, cx0 + pad, cy0 + pad, card_w - 2 * pad, tfs * 1.6, self._heading_bold(tfs))
-        self._fill_box(page, (cx0 + pad, cy0 + pad, cx1 - pad, cy0 + pad + int(tfs * 1.5)),
-                       take_word, polygons, tfs, tstyle, self._heading_bold(tfs), rtl, max_lines=1)
+        self._fill_box(
+            page,
+            (cx0 + pad, cy0 + pad, cx1 - pad, cy0 + pad + int(tfs * 1.5)),
+            take_word,
+            polygons,
+            tfs,
+            tstyle,
+            self._heading_bold(tfs),
+            rtl,
+            max_lines=1,
+        )
 
         # Photo placeholder.
         photo_w = int(card_w * 0.24)
@@ -356,8 +423,17 @@ class PageGenerator:
             lstyle = self._style_at(page, fx0, fy, label_col, fs * 2, 0)
             self._place_token(page, label, fx0, fy, fs, lstyle, self._maybe_bold(fs), polygons)
             vstyle = self._style_at(page, fx0 + label_col, fy, fx1 - fx0 - label_col, fs * 2, 0)
-            self._fill_box(page, (fx0 + label_col, fy, fx1, fy + int(fs * 1.7)),
-                           take_word, polygons, fs, vstyle, 0, rtl, max_lines=1)
+            self._fill_box(
+                page,
+                (fx0 + label_col, fy, fx1, fy + int(fs * 1.7)),
+                take_word,
+                polygons,
+                fs,
+                vstyle,
+                0,
+                rtl,
+                max_lines=1,
+            )
             fy += int(fs * 1.95)
 
         # Two MRZ-like lines across the bottom, sized to fit the card width.

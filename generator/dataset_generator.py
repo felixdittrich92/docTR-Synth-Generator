@@ -14,6 +14,7 @@ from queue import Empty
 from typing import Dict, List, Tuple
 
 from .components import (
+    BackgroundDownloader,
     CorpusDownloader,
     DatasetBalancer,
     DatasetSplitter,
@@ -25,7 +26,6 @@ from .components import (
     apply_casing_variants,
     generate_numeric_tokens,
 )
-from .components import BackgroundDownloader
 from .components.vocab_coverage import augment_words_for_coverage, resolve_target_vocab
 
 __all__ = ["SyntheticDatasetGenerator", "GenerationConfig"]

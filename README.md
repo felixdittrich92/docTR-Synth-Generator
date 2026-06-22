@@ -249,6 +249,97 @@ complex scripts are shaped correctly (Arabic joining, Indic conjuncts), and
 right-to-left languages (Arabic, Hebrew, ...) are laid out right-to-left so pages
 read naturally. For example `languages=["ar"]`, `["he"]`, `["zh"]` or `["hi"]`.
 
+## Plug into docTR training (on-the-fly, in-RAM)
+
+You can skip writing a dataset to disk entirely and feed freshly synthesised
+samples straight into docTR's training scripts. `generator/doctr_dataset.py`
+provides PyTorch `Dataset` wrappers that generate one sample per
+`__getitem__`, matching docTR's dataset contract - `(image_tensor, target)` per
+sample plus a static `collate_fn` - so they drop into the existing `DataLoader`
+in
+[`references/detection/train.py`](https://github.com/mindee/doctr/blob/main/references/detection/train.py)
+and
+[`references/recognition/train.py`](https://github.com/mindee/doctr/blob/main/references/recognition/train.py).
+
+Targets are identical to docTR's own datasets, so the model transforms and loss
+treat them the same: recognition yields the label string; detection yields
+`{CLASS_NAME: geoms}` with absolute-pixel polygons `(N, 4, 2)` when
+`use_polygons=True` else straight boxes `(N, 4)` as `[xmin, ymin, xmax, ymax]`.
+
+**Detection** - in `references/detection/train.py`, replace the
+`DetectionDataset(...)` construction (keep the `DataLoader` lines):
+
+```python
+from generator.components import GenerationConfig
+from generator.doctr_dataset import build_detection_datasets, synth_worker_init_fn
+
+cfg = GenerationConfig(
+    task="detection",
+    languages=["en", "de"],
+    num_images=50_000,  # POOL size (word variety + vocab coverage)
+    auto_download_backgrounds=True,
+)
+train_set, val_set = build_detection_datasets(
+    cfg,
+    train_samples=args.epochs and 20_000,  # virtual epoch length (len(dataset))
+    val_samples=2_000,
+    use_polygons=args.rotation,  # straight boxes unless --rotation
+    sample_transforms=batch_transforms,  # the script's existing transforms
+)
+```
+
+**Recognition** - in `references/recognition/train.py`, replace the
+`RecognitionDataset(...)` construction:
+
+```python
+from generator.components import GenerationConfig
+from generator.doctr_dataset import build_recognition_datasets, synth_worker_init_fn
+
+cfg = GenerationConfig(task="recognition", languages=["en", "de"], num_images=100_000)
+train_set, val_set = build_recognition_datasets(
+    cfg,
+    train_samples=50_000,
+    val_samples=5_000,
+    img_transforms=img_transforms,  # the script's existing resize/aug
+)
+```
+
+The `DataLoader` lines stay as they are - just keep
+`collate_fn=train_set.collate_fn` and add `worker_init_fn=synth_worker_init_fn`
+so every worker gets an independent RNG stream:
+
+```python
+train_loader = DataLoader(
+    train_set,
+    batch_size=args.batch_size,
+    shuffle=True,
+    drop_last=True,
+    num_workers=args.workers,
+    pin_memory=torch.cuda.is_available(),
+    collate_fn=train_set.collate_fn,
+    worker_init_fn=synth_worker_init_fn,
+)
+```
+
+Notes:
+
+- **Pool size vs epoch length.** `config.num_images` sizes the word *pool*
+  (variety and per-split vocab coverage); `train_samples` / `val_samples` set
+  the virtual epoch length (`len(dataset)`). Samples are generated fresh, so the
+  epoch length is just how many iterations you want per epoch.
+- **Seeding.** The train set draws a fresh random sample on every access (new
+  data every epoch - the whole point of on-the-fly); the val set is a
+  reproducible fixed virtual set (seeded per index) so metrics stay comparable.
+- **Coverage carries over.** The recognition pools come from the same balancing
+  and per-split character-coverage pipeline as the offline generator, so
+  sampling from them covers the target vocab.
+- **One-time setup.** Corpora, fonts and backgrounds are downloaded/resolved
+  once when the datasets are built (in the parent process), not per worker.
+- Requires PyTorch in your training environment (`pip install python-doctr`).
+  Importing the rest of this package never requires torch. For lower-level
+  control you can use `SyntheticDetectionDataset` / `SyntheticRecognitionDataset`
+  directly instead of the `build_*` factories.
+
 ## Realism
 
 Rendered crops are meant to match real captured documents rather than clean

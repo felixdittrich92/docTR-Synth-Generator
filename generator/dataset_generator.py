@@ -144,6 +144,27 @@ class SyntheticDatasetGenerator:
             train, val = self._inject_coverage(train, val, target)
         return train, val
 
+    def build_recognition_pools(self) -> tuple[list[str], list[str]]:
+        """Build the ``(train, val)`` recognition word pools (with vocab coverage).
+
+        Public entry point for the on-the-fly datasets in
+        :mod:`generator.doctr_dataset`. These are the very pools the offline
+        recognition generator samples from; sampling from them at train time
+        reproduces the same balance and per-split character coverage without
+        ever touching disk. ``config.num_images`` controls the pool size.
+        """
+        return self._prepare_train_val()
+
+    def build_detection_pool(self) -> list[str]:
+        """Resolve backgrounds (once) and return the detection word pool.
+
+        Call this in the parent process before constructing an on-the-fly
+        detection dataset so background images are downloaded/resolved a single
+        time rather than inside every DataLoader worker.
+        """
+        self._resolve_background_dir()
+        return self._resolve_word_pool()
+
     def _coverage_target(self, languages: list[str]) -> set[str] | None:
         """Union of vocab characters to guarantee, or None when disabled/unknown."""
         cfg = self.config

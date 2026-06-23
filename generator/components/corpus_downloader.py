@@ -263,5 +263,5 @@ def generate_numeric_tokens(n: int, seed: int | None = None) -> list[str]:
         elif kind == "percent":
             tokens.append(f"{rng.randint(0, 100)}%")
         else:  # phone
-            tokens.append(f"+{rng.randint(1, 99)} {rng.randint(100, 999)} {rng.randint(100000, 9999999)}")
+            tokens.append(f"+{rng.randint(1, 99)}{rng.randint(100, 999)}{rng.randint(100000, 9999999)}")
     return tokens

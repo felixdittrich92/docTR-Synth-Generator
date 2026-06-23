@@ -20,11 +20,31 @@ from .dataset_generator import SyntheticDatasetGenerator
 
 try:  # docTR's single-class name ("words"); fall back to the same literal if absent.
     from doctr.file_utils import CLASS_NAME  # type: ignore[import-not-found]
+    from doctr.utils import Sample  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - docTR not installed
+    from dataclasses import dataclass
+
     CLASS_NAME = "words"
+
+    @dataclass
+    class Sample:  # type: ignore[no-redef]
+        """Canonical data container for all transforms."""
+
+        image: Any
+        mask: Any | None = None
+        target: np.ndarray | dict[str, np.ndarray] | None = None
+
+        def replace(self, **kwargs) -> "Sample":
+            return Sample(
+                image=kwargs.get("image", self.image),
+                mask=kwargs.get("mask", self.mask),
+                target=kwargs.get("target", self.target),
+            )
+
 
 __all__ = [
     "CLASS_NAME",
+    "Sample",
     "polygons_to_target",
     "render_recognition_sample",
     "render_detection_sample",
@@ -118,7 +138,7 @@ def _torch():
 def _pil_to_tensor(img: Image.Image):
     """PIL RGB -> ``CxHxW`` float32 tensor in ``[0, 1]`` (matches docTR's reader)."""
     torch = _torch()
-    arr = np.asarray(img.convert("RGB"), dtype=np.uint8)
+    arr = np.asarray(img.convert("RGB"), dtype=np.uint8, copy=True)
     return torch.from_numpy(arr).permute(2, 0, 1).contiguous().float().div_(255.0)
 
 
@@ -175,11 +195,13 @@ class _BaseSynthDataset:
         self._seed_sample(index)
         img, target = self._render(index)
         tensor = _pil_to_tensor(img)
+        sample = Sample(image=tensor, target=target)
         if self.img_transforms is not None:
-            tensor = self.img_transforms(tensor)
+            sample = self.img_transforms(sample)
         if self.sample_transforms is not None:
-            tensor, target = self.sample_transforms(tensor, target)
-        return tensor, target
+            sample = self.sample_transforms(sample)
+        # Keep compatibility with the existing collate_fn
+        return sample.image, sample.target
 
     @staticmethod
     def collate_fn(samples):

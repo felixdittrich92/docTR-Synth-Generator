@@ -13,6 +13,7 @@ from generator.components.generator import TextImageGenerator
 from generator.components.page_generator import PageGenerator
 from generator.doctr_dataset import (
     CLASS_NAME,
+    Sample,
     SyntheticDetectionDataset,
     SyntheticRecognitionDataset,
     polygons_to_target,
@@ -109,7 +110,8 @@ def test_recognition_dataset_getitem_and_collate(tiny_font_dir):
     # docTR always pairs recognition with a fixed-size resize img_transform; raw
     # crops vary in size, so a resize must run before collate (as in training).
     def resize(t):
-        return F.interpolate(t.unsqueeze(0), size=(32, 128), mode="bilinear", align_corners=False).squeeze(0)
+        image = F.interpolate(t.image.unsqueeze(0), size=(32, 128), mode="bilinear", align_corners=False).squeeze(0)
+        return Sample(image=image, target=t.target)
 
     ds = SyntheticRecognitionDataset(REC_POOL, _cfg(tiny_font_dir, "recognition"), num_samples=8, img_transforms=resize)
     assert len(ds) == 8

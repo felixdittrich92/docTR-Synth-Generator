@@ -7,6 +7,8 @@
 # docTR-Synth-Generator
 A tool to generate synthetic OCR datasets - made for docTR
 
+![Examples: detection pages and recognition crops](docs/examples_grid.png)
+
 ## Features
 
 - **Zero-config**: generate a dataset with nothing but an output directory - real
@@ -130,6 +132,51 @@ words do not leak from train into val. A balance report is printed before
 generation (per-language train/val counts, train/val overlap, distinct/rare
 characters, word-length statistics); silence it with
 `print_balance_report=False`.
+
+## Supported languages
+
+Pass ISO 639-1 codes in `languages=[...]`. Each code resolves three things
+automatically: real words from a public frequency list (when one exists), a
+script-matching open-source font (downloaded on demand), and the docTR vocab
+used for coverage and for the recognition vocab restriction. Complex scripts are
+shaped correctly - Arabic, Hebrew and Urdu run right-to-left, and Indic, Thai and
+Myanmar clusters (consonant conjuncts, matras, medials, vowel signs and viramas)
+are built as valid grapheme clusters, including in synthesised coverage tokens.
+
+| Script | Languages (ISO 639-1 code) |
+| --- | --- |
+| Latin | Afrikaans (`af`), Azerbaijani (`az`), Catalan (`ca`), Czech (`cs`), Danish (`da`), Dutch (`nl`), English (`en`), Estonian (`et`), Basque (`eu`), Finnish (`fi`), French (`fr`), German (`de`), Hungarian (`hu`), Icelandic (`is`), Indonesian (`id`), Irish (`ga`), Italian (`it`), Latvian (`lv`), Lithuanian (`lt`), Maltese (`mt`), Norwegian (`no`/`nb`), Polish (`pl`), Portuguese (`pt`), Romanian (`ro`), Slovak (`sk`), Slovene (`sl`), Spanish (`es`), Albanian (`sq`), Swedish (`sv`), Croatian (`hr`), Turkish (`tr`), Vietnamese (`vi`) |
+| Cyrillic | Belarusian (`be`), Bulgarian (`bg`), Macedonian (`mk`), Russian (`ru`), Ukrainian (`uk`) |
+| Greek | Greek (`el`) |
+| Perso-Arabic | Arabic (`ar`), Persian (`fa`), Urdu (`ur`) |
+| Hebrew | Hebrew (`he`) |
+| Armenian | Armenian (`hy`) |
+| Georgian | Georgian (`ka`) |
+| Devanagari | Hindi (`hi`), Marathi (`mr`) |
+| Bengali | Bengali (`bn`) |
+| Gujarati | Gujarati (`gu`) |
+| Tamil | Tamil (`ta`) |
+| Telugu | Telugu (`te`) |
+| Kannada | Kannada (`kn`) |
+| Malayalam | Malayalam (`ml`) |
+| Oriya | Odia (`or`) |
+| Sinhala | Sinhala (`si`) |
+| Thai | Thai (`th`) |
+| Myanmar | Burmese (`my`) |
+| CJK | Japanese (`ja`), Korean (`ko`) - corpus-driven only (no fixed small vocab, so vocab-coverage synthesis is skipped) |
+
+A few notes:
+
+- A handful of languages have a vocab and a font but no public frequency list
+  (e.g. Burmese `my`, Odia `or`). They render correctly and their full character
+  set is still guaranteed through synthesised coverage tokens - you just won't
+  get a real-word corpus unless you supply your own via `wordlist_path`.
+- For **recognition**, any of the 214 keys in ``VOCABS`` (e.g. `"german"`,
+  `"arabic"`, `"hindi"`) can be used as ``target_vocab`` / the ``vocab`` argument,
+  and several may be combined for a multilingual model
+  (`["german", "urdu", "odia"]`); every generated label is then restricted to
+  that exact character set so a docTR model trained on the matching vocab never
+  sees an un-encodable character (see the docTR training section).
 
 ## Vocabulary coverage (recognition)
 
@@ -295,14 +342,27 @@ train_set, val_set = build_detection_datasets(
 from generator.components import GenerationConfig
 from generator.doctr_dataset import build_recognition_datasets, synth_worker_init_fn
 
-cfg = GenerationConfig(task="recognition", languages=["en", "de"], num_images=100_000)
+cfg = GenerationConfig(task="recognition", num_images=100_000)
 train_set, val_set = build_recognition_datasets(
     cfg,
     train_samples=50_000,
     val_samples=5_000,
+    vocab=args.vocab,  # e.g. ["german", "urdu", "odia"] - the model's vocab
     img_transforms=img_transforms,  # the script's existing resize/aug
 )
 ```
+
+Pass `vocab` the **same vocab you train the model on** - a `VOCABS` key, a
+literal charset, or a list of keys whose union is the model's vocab (e.g.
+`["german", "urdu", "odia"]`). Every generated label is then guaranteed to
+contain only characters in that vocab, so docTR's label encoder never hits an
+out-of-vocab character (which would otherwise crash training on the first batch).
+Corpus words outside the vocab are dropped, character coverage is guaranteed
+*within* the vocab, and the corpus languages are derived from the vocab keys
+automatically (`german` -> `de`); a key with no corpus (e.g. `odia`) still has
+its characters covered via synthesis. Set `config.languages` explicitly to pull
+different corpora. The same restriction applies to the offline generator via
+`GenerationConfig(target_vocab=[...])`.
 
 The `DataLoader` lines stay as they are - just keep
 `collate_fn=train_set.collate_fn` and add `worker_init_fn=synth_worker_init_fn`

@@ -10,7 +10,14 @@ from functools import lru_cache
 
 from .vocabs import VOCABS
 
-__all__ = ["LANGUAGE_TO_VOCAB", "resolve_target_vocab", "augment_words_for_coverage"]
+__all__ = [
+    "LANGUAGE_TO_VOCAB",
+    "VOCAB_TO_LANGUAGE",
+    "resolve_target_vocab",
+    "resolve_vocab_charset",
+    "filter_in_vocab",
+    "augment_words_for_coverage",
+]
 
 # ISO 639-1 code -> VOCABS key (only mappings whose vocab actually exists).
 LANGUAGE_TO_VOCAB: dict[str, str] = {
@@ -56,6 +63,7 @@ LANGUAGE_TO_VOCAB: dict[str, str] = {
     "nb": "norwegian",
     "nl": "dutch",
     "no": "norwegian",
+    "or": "odia",
     "pl": "polish",
     "pt": "portuguese",
     "ro": "romanian",
@@ -75,27 +83,65 @@ LANGUAGE_TO_VOCAB: dict[str, str] = {
 }
 
 
-def resolve_target_vocab(language: str | None, target_vocab: str | None) -> set[str] | None:
+VOCAB_TO_LANGUAGE: dict[str, str] = {}
+for _iso, _key in LANGUAGE_TO_VOCAB.items():
+    VOCAB_TO_LANGUAGE.setdefault(_key, _iso)  # first ISO code wins
+
+
+def resolve_vocab_charset(vocab: str | list[str] | tuple[str, ...] | set[str] | None) -> set[str] | None:
+    """Resolve a vocab spec into the set of allowed characters.
+
+    Args:
+        vocab: a single :data:`VOCABS` key (e.g. ``"german"``), a literal string
+            of characters, or an iterable of any of those. The result is the
+            union over all of them - so ``["german", "urdu", "odia"]`` yields the
+            combined character set those three vocabs cover.
+
+    Returns:
+        The union character set, or ``None`` when nothing resolves.
+    """
+    if not vocab:
+        return None
+    items = [vocab] if isinstance(vocab, str) else list(vocab)
+    chars: set[str] = set()
+    for item in items:
+        if not item:
+            continue
+        chars |= set(VOCABS[item]) if item in VOCABS else set(item)
+    return chars or None
+
+
+def resolve_target_vocab(language: str | None, target_vocab: str | list[str] | None) -> set[str] | None:
     """Resolve the set of characters that must be covered.
 
     Args:
         language (str | None): ISO 639-1 code used to look up a vocab.
-        target_vocab (str | None): Explicit override - either a key in
-            ``VOCABS`` (e.g. ``"german"``) or a literal string of characters.
-            When set it takes precedence over ``language``.
+        target_vocab: Explicit override - a :data:`VOCABS` key, a literal string
+            of characters, or a list of those (their union). Takes precedence
+            over ``language`` when set.
 
     Returns:
         set[str] | None: The character set to cover, or ``None`` when nothing
         sensible can be resolved (e.g. CJK, which has no fixed small vocab).
     """
     if target_vocab:
-        chars = VOCABS[target_vocab] if target_vocab in VOCABS else target_vocab
-        return set(chars)
+        return resolve_vocab_charset(target_vocab)
     if language:
         key = LANGUAGE_TO_VOCAB.get(language.lower())
         if key and key in VOCABS:
             return set(VOCABS[key])
     return None
+
+
+def filter_in_vocab(words: list[str], charset: set[str] | None) -> list[str]:
+    """Keep only words whose every character lies within ``charset``.
+
+    A no-op when ``charset`` is ``None``. This is what guarantees a recognition
+    model trained on a fixed vocab never sees a label it cannot encode.
+    """
+    if not charset:
+        return list(words)
+    return [w for w in words if w and set(w) <= charset]
 
 
 _LARGE_SCRIPT_THRESHOLD = 400  # scripts bigger than this (CJK, Hangul) are left to the corpus
@@ -129,6 +175,17 @@ def _is_mark(char: str) -> bool:
     return unicodedata.category(char).startswith("M")
 
 
+def _is_virama(char: str) -> bool:
+    """True for viramas/halants - stackers that must be followed by a consonant.
+
+    Canonical combining class 9 marks this family across Brahmic scripts
+    (Devanagari U+094D, Bengali U+09CD, Tamil U+0BCD, Myanmar U+1039, Khmer
+    U+17D2, ...). A dangling virama renders a dotted circle, so synthesised
+    tokens must keep it between two base letters.
+    """
+    return unicodedata.combining(char) == 9
+
+
 def _make_token(
     char: str,
     script_words: dict[str, list[str]],
@@ -154,8 +211,31 @@ def _make_token(
     bases = script_words.get(script, [])
 
     if _is_mark(char):
-        # A combining mark must sit on a base letter. Prefer inserting it right
-        # after a letter of a real same-script word.
+        if _is_virama(char):
+            # A virama/halant (canonical combining class 9) is a stacker: it must
+            # sit BETWEEN two base letters (consonant + virama + consonant) to form
+            # a valid conjunct, never dangling at the end (which renders a dotted
+            # circle). This matters for Myanmar U+1039, Khmer U+17D2, Indic halants.
+            for _ in range(6):  # prefer a real word where a letter already follows
+                if not bases:
+                    break
+                word = rng.choice(bases)
+                positions = [
+                    i
+                    for i in range(len(word) - 1)
+                    if unicodedata.category(word[i]).startswith("L")
+                    and unicodedata.category(word[i + 1]).startswith("L")
+                ]
+                if positions:
+                    i = rng.choice(positions)
+                    return (word[: i + 1] + char + word[i + 1 :])[:16]
+            if base_letters:  # scaffold: always a consonant on both sides of the virama
+                lead = "".join(rng.choice(base_letters) for _ in range(rng.randint(1, 2)))
+                tail = "".join(rng.choice(base_letters) for _ in range(rng.randint(1, 2)))
+                return (lead + char + tail)[:16]
+            return ""
+        # A non-virama combining mark must sit on a base letter. Prefer inserting
+        # it right after a letter of a real same-script word.
         for _ in range(6):
             if not bases:
                 break

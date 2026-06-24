@@ -26,7 +26,12 @@ from .components import (
     apply_casing_variants,
     generate_numeric_tokens,
 )
-from .components.vocab_coverage import augment_words_for_coverage, resolve_target_vocab
+from .components.vocab_coverage import (
+    augment_words_for_coverage,
+    filter_in_vocab,
+    resolve_target_vocab,
+    resolve_vocab_charset,
+)
 
 __all__ = ["SyntheticDatasetGenerator", "GenerationConfig"]
 
@@ -78,15 +83,20 @@ class SyntheticDatasetGenerator:
         language balancing and a stratified split.
         """
         cfg = self.config
+        charset = self._vocab_charset()
 
         if cfg.wordlist_path is not None:
             words = DatasetSplitter.load_vocabulary(cfg.wordlist_path)
             print(f"Loaded {len(words)} words from wordlist '{cfg.wordlist_path}'.")
+            if charset:
+                before = len(words)
+                words = filter_in_vocab(words, charset)
+                print(f"  vocab restriction: kept {len(words)}/{before} words within the target vocab.")
             train, val = DatasetSplitter.prepare_splits(words, cfg.num_images, cfg.val_percent, ensure_coverage=True)
             target = self._coverage_target([])  # only an explicit target_vocab applies here
             if target:
                 train, val = self._inject_coverage(train, val, target)
-            return train, val
+            return filter_in_vocab(train, charset), filter_in_vocab(val, charset)
 
         languages = cfg.languages or ["en"]
         cache_dir = cfg.corpus_cache_dir or ".corpus_cache"
@@ -109,6 +119,11 @@ class SyntheticDatasetGenerator:
                 continue
             if cfg.casing_variant_prob > 0:
                 pool = apply_casing_variants(pool, prob=cfg.casing_variant_prob, seed=cfg.corpus_seed)
+            if charset:
+                pool = filter_in_vocab(pool, charset)
+                if not pool:
+                    print(f"  warning: no words for '{lang}' remain within the target vocab, skipping it.")
+                    continue
             language_pools[lang] = pool
 
         if not language_pools:
@@ -121,6 +136,8 @@ class SyntheticDatasetGenerator:
         if cfg.numeric_token_ratio > 0:
             n_pool = max(256, int(cfg.num_images * cfg.numeric_token_ratio) * 2)
             numeric_tokens = generate_numeric_tokens(n_pool, seed=cfg.corpus_seed)
+            if charset:
+                numeric_tokens = filter_in_vocab(numeric_tokens, charset) or None
 
         balancer = DatasetBalancer(seed=cfg.corpus_seed)
         result = balancer.allocate_and_split(
@@ -142,7 +159,7 @@ class SyntheticDatasetGenerator:
         target = self._coverage_target(languages)
         if target:
             train, val = self._inject_coverage(train, val, target)
-        return train, val
+        return filter_in_vocab(train, charset), filter_in_vocab(val, charset)
 
     def build_recognition_pools(self) -> tuple[list[str], list[str]]:
         """Build the ``(train, val)`` recognition word pools (with vocab coverage).
@@ -164,6 +181,18 @@ class SyntheticDatasetGenerator:
         """
         self._resolve_background_dir()
         return self._resolve_word_pool()
+
+    def _vocab_charset(self) -> set[str] | None:
+        """Characters recognition labels must stay within (the model's vocab).
+
+        Returns the union character set of ``target_vocab`` when restriction is
+        enabled, else ``None`` (no restriction). Used to drop any word a docTR
+        model trained on that vocab could not encode.
+        """
+        cfg = self.config
+        if not cfg.restrict_to_vocab:
+            return None
+        return resolve_vocab_charset(cfg.target_vocab)
 
     def _coverage_target(self, languages: list[str]) -> set[str] | None:
         """Union of vocab characters to guarantee, or None when disabled/unknown."""

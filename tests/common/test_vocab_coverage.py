@@ -104,3 +104,44 @@ def test_present_rare_chars_are_covered_with_real_words():
     latin_tokens = [t for t in added if any("a" <= c <= "z" for c in t)]
     assert latin_tokens
     assert all(t in words for t in latin_tokens)  # covered by repeating real words
+
+
+def test_resolve_vocab_charset_union_and_filter():
+    from generator.components.vocab_coverage import (
+        VOCAB_TO_LANGUAGE,
+        filter_in_vocab,
+        resolve_vocab_charset,
+    )
+
+    only_en = resolve_vocab_charset("english")
+    union = resolve_vocab_charset(["english", "german"])
+    assert only_en and union and only_en <= union  # union is a superset
+    # literal strings are accepted too
+    assert resolve_vocab_charset("abc") == set("abc")
+    # filtering keeps only words fully inside the charset
+    kept = filter_in_vocab(["hello", "world", "naïve", "привет"], only_en)
+    assert "hello" in kept and "world" in kept
+    assert "привет" not in kept  # out-of-vocab script dropped
+    # reverse mapping resolves the example keys to corpus languages
+    assert VOCAB_TO_LANGUAGE["german"] == "de" and VOCAB_TO_LANGUAGE["urdu"] == "ur"
+
+
+def test_synthesized_virama_is_never_dangling():
+    # A virama/halant (combining class 9) must sit between two base letters, not
+    # at the end of a token (which renders an invalid dotted circle). Burmese has
+    # no frequency corpus, so every token here is synthesised.
+    import unicodedata
+
+    from generator.components.vocab_coverage import resolve_target_vocab
+
+    target = resolve_target_vocab("my", None)  # Burmese
+    augmented, _, _ = augment_words_for_coverage([], target, min_count=3, seed=2)
+    viramas = {c for c in target if unicodedata.combining(c) == 9}
+    assert viramas  # sanity: Burmese vocab includes U+1039
+    for token in augmented:
+        for i, ch in enumerate(token):
+            if ch in viramas:
+                assert i + 1 < len(token), f"dangling virama in {token!r}"
+                assert unicodedata.category(token[i + 1]).startswith("L"), (
+                    f"virama not followed by a letter in {token!r}"
+                )

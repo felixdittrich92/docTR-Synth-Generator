@@ -158,3 +158,24 @@ def test_empty_pool_raises(tiny_font_dir):
         SyntheticRecognitionDataset([], _cfg(tiny_font_dir, "recognition"), num_samples=4)
     with pytest.raises(ValueError):
         SyntheticDetectionDataset([], _det_cfg(tiny_font_dir), num_samples=4)
+
+
+def test_recognition_dataset_restricts_to_vocab(tiny_font_dir):
+    pytest.importorskip("torch")
+    from generator.components.vocab_coverage import resolve_vocab_charset
+
+    pool = ["hello", "world", "naive", "привет", "日本語"]  # last two are out-of-vocab
+    ds = SyntheticRecognitionDataset(pool, _cfg(tiny_font_dir, "recognition"), num_samples=6, vocab="english")
+    charset = resolve_vocab_charset("english")
+    assert ds.pool and all(set(w) <= charset for w in ds.pool)  # pool filtered to the vocab
+    assert "привет" not in ds.pool and "日本語" not in ds.pool
+    _, label = ds[0]
+    assert set(label) <= charset  # every emitted label is encodable by the model
+
+
+def test_recognition_dataset_empty_after_vocab_filter_raises(tiny_font_dir):
+    pytest.importorskip("torch")
+    with pytest.raises(ValueError):
+        SyntheticRecognitionDataset(
+            ["日本語", "привет"], _cfg(tiny_font_dir, "recognition"), num_samples=4, vocab="english"
+        )

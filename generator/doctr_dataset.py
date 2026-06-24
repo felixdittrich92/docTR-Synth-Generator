@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import random
 import time
+import warnings
+from dataclasses import replace
 from typing import Any, Callable
 
 import numpy as np
@@ -16,6 +18,7 @@ from PIL import Image
 from .components.config import GenerationConfig
 from .components.generator import TextImageGenerator
 from .components.page_generator import PageGenerator
+from .components.vocab_coverage import VOCAB_TO_LANGUAGE, resolve_vocab_charset
 from .dataset_generator import SyntheticDatasetGenerator
 
 try:  # docTR's single-class name ("words"); fall back to the same literal if absent.
@@ -231,6 +234,7 @@ class SyntheticRecognitionDataset(_BaseSynthDataset):
         config: GenerationConfig,
         num_samples: int,
         *,
+        vocab: str | list[str] | None = None,
         img_transforms: Callable | None = None,
         sample_transforms: Callable | None = None,
         seed: int | None = None,
@@ -239,6 +243,15 @@ class SyntheticRecognitionDataset(_BaseSynthDataset):
         super().__init__(num_samples, img_transforms=img_transforms, sample_transforms=sample_transforms, seed=seed)
         if not pool:
             raise ValueError("recognition word pool is empty")
+        # Restrict labels to the model's vocab so docTR can encode every one of
+        # them (a single out-of-vocab character crashes training). The vocab is
+        # taken from an explicit ``vocab`` arg, else ``config.target_vocab``.
+        spec = vocab if vocab is not None else (config.target_vocab if config.restrict_to_vocab else None)
+        self.charset = resolve_vocab_charset(spec)
+        if self.charset:
+            pool = [w for w in pool if w and set(w) <= self.charset]
+            if not pool:
+                raise ValueError("recognition word pool is empty after vocab filtering")
         self.pool = list(pool)
         self.config = config
         self.max_attempts = max_attempts
@@ -309,6 +322,7 @@ def build_recognition_datasets(
     *,
     train_samples: int,
     val_samples: int,
+    vocab: str | list[str] | None = None,
     img_transforms: Callable | None = None,
     sample_transforms: Callable | None = None,
     val_seed: int = 1234,
@@ -319,13 +333,39 @@ def build_recognition_datasets(
     draws fresh crops every access; the val set is a reproducible virtual set.
     ``config.num_images`` sets the *pool* size (variety); ``train_samples`` /
     ``val_samples`` set the per-epoch iteration counts.
+
+    Pass ``vocab`` to pin the docTR vocab to train against - a ``VOCABS`` key, a
+    literal charset, or a list such as ``["german", "urdu", "odia"]`` (their
+    union). Every generated label is then guaranteed to fall within that
+    character set, so a docTR recognition model trained on the matching
+    ``--vocab`` never hits a label it cannot encode. When ``config.languages`` is
+    empty the corpus languages are derived from the vocab keys (``german`` ->
+    ``de``); keys with no corpus mapping are still covered via synthesis.
     """
+    if vocab is not None:
+        keys = [vocab] if isinstance(vocab, str) else list(vocab)
+        derived = [VOCAB_TO_LANGUAGE[k] for k in keys if k in VOCAB_TO_LANGUAGE]
+        unmapped = [k for k in keys if k not in VOCAB_TO_LANGUAGE]
+        # Use the vocab-derived corpus languages unless the user picked their own
+        # (i.e. set config.languages to something other than the "en" default).
+        user_chose = bool(config.languages) and list(config.languages) != ["en"]  # type: ignore[arg-type]
+        languages = list(config.languages) if user_chose else (derived or config.languages)  # type: ignore[arg-type]
+        if unmapped and not user_chose:
+            warnings.warn(
+                f"No corpus language mapping for vocab key(s) {unmapped}; their characters "
+                "will still be covered via synthesis, but pass an explicit `languages=[...]` "
+                "on the config to also pull real words for them.",
+                stacklevel=2,
+            )
+        config = replace(config, target_vocab=vocab, restrict_to_vocab=True, languages=languages)
+
     pipeline = SyntheticDatasetGenerator(config)
     train_pool, val_pool = pipeline.build_recognition_pools()
     train_set = SyntheticRecognitionDataset(
         train_pool,
         config,
         train_samples,
+        vocab=vocab,
         img_transforms=img_transforms,
         sample_transforms=sample_transforms,
         seed=None,
@@ -334,6 +374,7 @@ def build_recognition_datasets(
         val_pool,
         config,
         val_samples,
+        vocab=vocab,
         img_transforms=img_transforms,
         sample_transforms=sample_transforms,
         seed=val_seed,

@@ -68,9 +68,16 @@ class GenerationConfig:
             tokens so every character of the target language vocab (docTR
             ``VOCABS``) appears, even when the real corpus lacks it. Default True;
             a no-op for languages with no fixed small vocab (e.g. CJK).
-        target_vocab (str | None): Override the vocab to cover - a ``VOCABS`` key
-            (e.g. ``"german"``) or a literal string of characters. Applies to all
-            languages when set; otherwise each language maps to its own vocab.
+        target_vocab: Override the vocab to cover and to restrict labels to - a
+            ``VOCABS`` key (e.g. ``"german"``), a literal string of characters,
+            or a list of those (their union, e.g. ``["german", "urdu", "odia"]``).
+            Applies to all languages when set; otherwise each language maps to
+            its own vocab.
+        restrict_to_vocab (bool): For recognition, drop any generated word that
+            contains a character outside ``target_vocab`` so every label can be
+            encoded by a docTR model trained on that exact vocab (otherwise
+            training crashes on the first out-of-vocab character). Default True;
+            only takes effect when ``target_vocab`` is set.
         vocab_coverage_min_count (int): Minimum samples each vocab character must
             appear in (drives both synthesis and the final coverage top-up).
 
@@ -197,7 +204,8 @@ class GenerationConfig:
 
     # Vocabulary coverage (recognition)
     ensure_vocab_coverage: bool = True
-    target_vocab: str | None = None
+    target_vocab: "str | list[str] | None" = None
+    restrict_to_vocab: bool = True
     vocab_coverage_min_count: int = 3
 
     # Automatic font downloading

@@ -25,7 +25,7 @@ def test_balancing_and_cache_defaults():
     assert cfg.balance.language_balance == "balanced"
     assert cfg.balance.language_weights is None
     assert cfg.balance.min_char_coverage == 0
-    assert cfg.resources.bg_cache_size == 16
+    assert cfg.resources.bg_cache_size == 50
     assert cfg.realism.supersample >= 1
 
 

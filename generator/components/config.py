@@ -81,7 +81,7 @@ class ResourceConfig:
     background_cache_dir: str | None = None
     font_download_timeout: int = 30
     background_manifest_url: str | None = None
-    bg_cache_size: int = 16
+    bg_cache_size: int = 50
     bg_max_dimension: int = 2000
 
 
@@ -156,7 +156,7 @@ class RecognitionConfig:
     """
 
     font_size_range: tuple[int, int] = (15, 40)
-    padding: int = 4
+    padding: int = 2
 
 
 @dataclass
@@ -193,9 +193,9 @@ class RealismConfig:
     invert_prob: float = 0.15
     bold_prob: float = 0.3
     bold_width_frac_range: tuple[float, float] = (0.03, 0.06)
-    rotation_prob: float = 0.6
+    rotation_prob: float = 0.15
     blur_prob: float = 0.2
-    perspective_prob: float = 0.3
+    perspective_prob: float = 0.25
     pixel_dropout_prob: float = 0.15
     rotation_range: tuple[float, float] = (-2, 2)
     blur_radius_range: tuple[float, float] = (0.3, 1.0)
@@ -203,7 +203,7 @@ class RealismConfig:
     pixel_dropout_range: tuple[float, float] = (0.1, 0.2)
     final_blur_prob: float = 0.15
     final_blur_radius_range: tuple[float, float] = (0.3, 1.2)
-    noise_prob: float = 0.25
+    noise_prob: float = 0.2
     noise_std_range: tuple[float, float] = (2.0, 12.0)
     jpeg_prob: float = 0.3
     jpeg_quality_range: tuple[int, int] = (35, 92)
@@ -235,7 +235,7 @@ class DetectionConfig:
 
     page_width_range: tuple[int, int] = (700, 1100)
     page_height_range: tuple[int, int] = (900, 1500)
-    font_size_range: tuple[int, int] = (14, 32)
+    font_size_range: tuple[int, int] = (12, 32)
     max_words_per_page: int = 600
     margin_ratio: float = 0.06
     block_gap_range: tuple[float, float] = (0.5, 1.5)
@@ -247,7 +247,7 @@ class DetectionConfig:
     max_blocks: int = 60
     heading_prob: float = 0.3
     plain_background_prob: float = 0.4
-    rotation_prob: float = 0.3
+    rotation_prob: float = 0.15
     rotation_range: tuple[float, float] = (-2.5, 2.5)
 
 

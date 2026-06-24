@@ -7,7 +7,7 @@
 # docTR-Synth-Generator
 A tool to generate synthetic OCR datasets - made for docTR
 
-![Examples: detection pages and recognition crops](docs/examples_grid.png)
+![Examples: detection pages and recognition crops](https://github.com/felixdittrich92/docTR-Synth-Generator/raw/main/docs/examples_grid.png)
 
 ## Features
 

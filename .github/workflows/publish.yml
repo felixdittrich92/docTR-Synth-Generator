@@ -34,10 +34,11 @@ jobs:
         env:
           TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
-          VERSION: ${{ env.VERSION }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
           sed -i '/python-doctr@git/d' pyproject.toml
 
+          VERSION="${TAG_NAME#v}"
           BUILD_VERSION=$VERSION python -m build
           twine check dist/*
           twine upload dist/* --verbose

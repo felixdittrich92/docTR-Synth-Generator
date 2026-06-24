@@ -22,8 +22,8 @@ from .components.vocab_coverage import VOCAB_TO_LANGUAGE, resolve_vocab_charset
 from .dataset_generator import SyntheticDatasetGenerator
 
 try:  # docTR's single-class name ("words"); fall back to the same literal if absent.
-    from doctr.file_utils import CLASS_NAME  # type: ignore[import-not-found]
-    from doctr.utils import Sample  # type: ignore[import-not-found]
+    from doctr.file_utils import CLASS_NAME
+    from doctr.utils import Sample
 except Exception:  # pragma: no cover - docTR not installed
     from dataclasses import dataclass
 
@@ -129,7 +129,7 @@ def render_detection_sample(
 # --------------------------------------------------------------------------- #
 def _torch():
     try:
-        import torch  # type: ignore[import-not-found]
+        import torch
     except ImportError as exc:  # pragma: no cover - exercised only without torch
         raise ImportError(
             "PyTorch is required for the on-the-fly docTR datasets. Install it in your "

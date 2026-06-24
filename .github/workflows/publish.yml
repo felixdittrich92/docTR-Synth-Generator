@@ -28,19 +28,19 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install setuptools wheel twine --upgrade
-      - name: Get release tag
-        id: release_tag
-        run: echo "VERSION=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
+          pip install build twine --upgrade
+
       - name: Build and publish
         env:
           TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
           VERSION: ${{ env.VERSION }}
         run: |
-          BUILD_VERSION=$VERSION python setup.py sdist bdist_wheel
+          sed -i '/python-doctr@git/d' pyproject.toml
+
+          BUILD_VERSION=$VERSION python -m build
           twine check dist/*
-          twine upload dist/*
+          twine upload dist/* --verbose
 
   pypi-check:
     needs: pypi

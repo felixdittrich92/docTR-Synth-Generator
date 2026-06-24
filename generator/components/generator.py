@@ -10,8 +10,8 @@ from queue import Empty
 import numpy as np
 from PIL import Image
 
-from ..components.config import GenerationConfig
 from .background_manager import BackgroundManager
+from .config import GenerationConfig
 from .font_selector import FontSelector
 from .text_renderer import TextRenderer, TextStyle
 from .text_styling import (
@@ -51,16 +51,16 @@ class TextImageGenerator:
     def __init__(self, config: GenerationConfig):
         self.config = config
         self.font_selector = FontSelector(
-            config.font_dir,
-            auto_download=config.auto_download_fonts,
-            font_cache_dir=config.font_cache_dir,
-            download_timeout=config.font_download_timeout,
+            config.resources.font_dir,
+            auto_download=config.resources.auto_download_fonts,
+            font_cache_dir=config.resources.font_cache_dir,
+            download_timeout=config.resources.font_download_timeout,
         )
         self.text_renderer = TextRenderer(config)
         self.background_manager = BackgroundManager(
-            config.bg_image_dir,
-            cache_size=config.bg_cache_size,
-            max_dimension=config.bg_max_dimension,
+            config.resources.bg_image_dir,
+            cache_size=config.resources.bg_cache_size,
+            max_dimension=config.resources.bg_max_dimension,
         )
 
         # Image-space degradations applied AFTER compositing text onto the
@@ -105,7 +105,7 @@ class TextImageGenerator:
 
         # Render the glyph once as a black coverage map (single getbbox/draw).
         coverage = None
-        for _ in range(self.config.max_attempts):
+        for _ in range(self.config.core.max_attempts):
             candidate = self.text_renderer.render_coverage(text, font_path, font_size, bold_width)
             if self.is_text_visible(candidate):
                 coverage = candidate
@@ -131,8 +131,8 @@ class TextImageGenerator:
         """Worker process function that processes tasks from the queue."""
         print(f"Worker {worker_id} starting...")
 
-        save_format = "JPEG" if config.output_jpeg else "PNG"
-        save_kwargs = {"quality": config.output_jpeg_quality} if config.output_jpeg else {}
+        save_format = "JPEG" if config.core.output_jpeg else "PNG"
+        save_kwargs = {"quality": config.core.output_jpeg_quality} if config.core.output_jpeg else {}
 
         try:
             generator = TextImageGenerator(config)

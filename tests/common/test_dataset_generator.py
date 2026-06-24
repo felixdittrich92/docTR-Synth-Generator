@@ -10,7 +10,7 @@ def test_prepare_train_val_uses_wordlist(tmp_path):
     with open(p, "w", encoding="utf-8") as f:
         f.write("\n".join(f"w{i}" for i in range(50)))
 
-    cfg = GenerationConfig(wordlist_path=p, output_dir="ds", num_images=20, val_percent=0.25)
+    cfg = GenerationConfig.flat(wordlist_path=p, output_dir="ds", num_images=20, val_percent=0.25)
     train, val = SyntheticDatasetGenerator(cfg)._prepare_train_val()
 
     assert len(train) + len(val) == 20
@@ -29,7 +29,7 @@ def test_prepare_train_val_downloads_balanced_corpus(monkeypatch):
         lambda self, lang: pools.get(lang, []),
     )
 
-    cfg = GenerationConfig(
+    cfg = GenerationConfig.flat(
         ensure_vocab_coverage=False,
         output_dir="ds",
         num_images=200,
@@ -55,7 +55,7 @@ def test_resolve_word_pool_from_wordlist():
     p = os.path.join(tempfile.mkdtemp(), "words.txt")
     with open(p, "w", encoding="utf-8") as f:
         f.write("\n".join(f"w{i}" for i in range(40)))
-    cfg = GenerationConfig(task="detection", wordlist_path=p, output_dir="ds", num_images=3)
+    cfg = GenerationConfig.flat(task="detection", wordlist_path=p, output_dir="ds", num_images=3)
     pool = SyntheticDatasetGenerator(cfg)._resolve_word_pool()
     assert len(pool) == 40
     assert set(pool) == {f"w{i}" for i in range(40)}
@@ -66,7 +66,7 @@ def test_resolve_word_pool_from_corpus(monkeypatch):
         "generator.dataset_generator.CorpusDownloader.build_vocabulary",
         lambda self, languages, words_per_language=50000: [f"word{i}" for i in range(50)],
     )
-    cfg = GenerationConfig(
+    cfg = GenerationConfig.flat(
         ensure_vocab_coverage=False,
         task="detection",
         output_dir="ds",
@@ -85,7 +85,7 @@ def test_resolve_word_pool_from_corpus(monkeypatch):
         "generator.dataset_generator.CorpusDownloader.fetch",
         lambda self, lang: fake_words,
     )
-    cfg = GenerationConfig(
+    cfg = GenerationConfig.flat(
         ensure_vocab_coverage=False,
         output_dir="ds",
         num_images=100,
@@ -103,26 +103,59 @@ def test_resolve_word_pool_from_corpus(monkeypatch):
 
 
 def test_resolve_background_dir_respects_explicit():
-    cfg = GenerationConfig(output_dir="ds", num_images=1, bg_image_dir="/my/own/backgrounds")
+    cfg = GenerationConfig.flat(output_dir="ds", num_images=1, bg_image_dir="/my/own/backgrounds")
     gen = SyntheticDatasetGenerator(cfg)
     gen._resolve_background_dir()
-    assert cfg.bg_image_dir == "/my/own/backgrounds"  # unchanged, no download
+    assert cfg.resources.bg_image_dir == "/my/own/backgrounds"  # unchanged, no download
 
 
 def test_resolve_background_dir_disabled():
-    cfg = GenerationConfig(output_dir="ds", num_images=1, bg_image_dir=None, auto_download_backgrounds=False)
+    cfg = GenerationConfig.flat(output_dir="ds", num_images=1, bg_image_dir=None, auto_download_backgrounds=False)
     gen = SyntheticDatasetGenerator(cfg)
     gen._resolve_background_dir()
-    assert cfg.bg_image_dir is None  # stays blank, no download
+    assert cfg.resources.bg_image_dir is None  # stays blank, no download
 
 
 def test_resolve_background_dir_auto_download(monkeypatch):
     cache = tempfile.mkdtemp()
-    cfg = GenerationConfig(output_dir="ds", num_images=1, bg_image_dir=None, background_cache_dir=cache)
+    cfg = GenerationConfig.flat(output_dir="ds", num_images=1, bg_image_dir=None, background_cache_dir=cache)
     monkeypatch.setattr(
         "generator.dataset_generator.BackgroundDownloader.download_all",
         lambda self: [os.path.join(cache, "a.png")],
     )
     gen = SyntheticDatasetGenerator(cfg)
     gen._resolve_background_dir()
-    assert cfg.bg_image_dir == cache
+    assert cfg.resources.bg_image_dir == cache
+
+
+def test_generate_dataset_dispatches_on_task(monkeypatch, tmp_path):
+    # Regression: task lives at config.core.task; the dispatch must read it there
+    # (a stale flat/getattr lookup silently routed everything to recognition).
+    import pytest
+
+    import generator.dataset_generator as dg
+
+    class _DetError(Exception):
+        pass
+
+    class _RecError(Exception):
+        pass
+
+    def _raise(exc):
+        def _f(self, *a, **k):
+            raise exc()
+
+        return _f
+
+    monkeypatch.setattr(dg.SyntheticDatasetGenerator, "_generate_detection_dataset", _raise(_DetError))
+    monkeypatch.setattr(dg.SyntheticDatasetGenerator, "_prepare_train_val", _raise(_RecError))
+
+    det = GenerationConfig.flat(
+        task="detection", output_dir=str(tmp_path), num_images=2, auto_download_backgrounds=False
+    )
+    with pytest.raises(_DetError):
+        SyntheticDatasetGenerator(det).generate_dataset()
+
+    rec = GenerationConfig.flat(task="recognition", output_dir=str(tmp_path), num_images=2)
+    with pytest.raises(_RecError):
+        SyntheticDatasetGenerator(rec).generate_dataset()

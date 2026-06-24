@@ -30,7 +30,7 @@ def _cfg(tiny_font_dir, **kw):
         supersample=2,
     )
     base.update(kw)
-    return GenerationConfig(**base)
+    return GenerationConfig.flat(**base)
 
 
 def test_generate_page_returns_image_and_polygons(tiny_font_dir):

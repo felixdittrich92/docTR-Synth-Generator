@@ -30,7 +30,7 @@ def _gen(tiny_font_dir, temp_image_dir, **kw):
         contrast_jitter=0.0,
     )
     base.update(kw)
-    return TextImageGenerator(GenerationConfig(**base))
+    return TextImageGenerator(GenerationConfig.flat(**base))
 
 
 def test_is_text_visible(tiny_font_dir, temp_image_dir):

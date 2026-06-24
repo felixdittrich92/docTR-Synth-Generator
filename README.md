@@ -2,7 +2,7 @@
 ![Build Status](https://github.com/felixdittrich92/docTR-Synth-Generator/workflows/builds/badge.svg)
 [![codecov](https://codecov.io/gh/felixdittrich92/docTR-Synth-Generator/graph/badge.svg?token=31MDR20JGI)](https://codecov.io/gh/felixdittrich92/docTR-Synth-Generator)
 [![CodeFactor](https://www.codefactor.io/repository/github/felixdittrich92/doctr-synth-generator/badge)](https://www.codefactor.io/repository/github/felixdittrich92/doctr-synth-generator)
-[![Pypi](https://img.shields.io/badge/pypi-v0.2.1-blue.svg)](https://pypi.org/project/docTR-Synth-Generator/)
+[![Pypi](https://img.shields.io/badge/pypi-v0.3.0a0-blue.svg)](https://pypi.org/project/docTR-Synth-Generator/)
 
 # docTR-Synth-Generator
 A tool to generate synthetic OCR datasets - made for docTR
@@ -29,87 +29,98 @@ A tool to generate synthetic OCR datasets - made for docTR
 - **Fast & memory-bounded**: font objects and decoded backgrounds are cached, with
   a configurable cache size.
 
-## Quickstart (zero configuration)
+## Quickstart
 
-You no longer need to provide a wordlist or a font directory. With nothing but an
-output directory and a count, the generator downloads real words for the
-requested language(s) and automatically fetches matching open-source fonts:
+One call - the words, fonts and backgrounds it needs are downloaded and cached
+automatically. English by default:
 
 ```python
-from generator import GenerationConfig, SyntheticDatasetGenerator
+from generator import generate_dataset
 
-config = GenerationConfig(output_dir="output_dataset", num_images=1000)  # English by default
-SyntheticDatasetGenerator(config).generate_dataset()
+generate_dataset("output_dataset", num_images=1000)
 ```
 
-Multilingual is a one-liner - a language code selects both its words *and* its
-script, so the correct fonts are pulled in for you:
+Multilingual is just a list of ISO 639-1 codes; each code selects its words *and*
+its script, so matching fonts are pulled in and complex scripts are shaped
+correctly:
 
 ```python
-config = GenerationConfig(
-    output_dir="output_dataset",
-    num_images=10000,
-    languages=["en", "de", "ru", "el", "ar"],  # words + fonts resolved automatically
-    bg_image_dir="resources/background_images",  # optional; blank backgrounds otherwise
+generate_dataset("output_dataset", num_images=10000, languages=["en", "de", "ru", "el", "ar"])
+```
+
+Detection pages instead of recognition crops:
+
+```python
+generate_dataset("pages", num_images=5000, task="detection", languages=["en", "de"])
+```
+
+...or straight from the command line (installs as `doctr-synth`, also runnable as `python -m generator`):
+
+```bash
+doctr-synth output_dataset -n 10000 -l en de ru
+doctr-synth pages -t detection -l en de --layout newspaper
+```
+
+> The first run downloads word lists, fonts and backgrounds from public mirrors
+> and caches them; later runs are offline. To stay fully offline from the start,
+> supply your own `wordlist_path` and `font_dir` (see below).
+
+`generate_dataset(...)` is a thin wrapper over the `GenerationConfig` +
+`SyntheticDatasetGenerator` pair you can still use directly for full control. The
+config is organised into focused sub-configs (`core`, `resources`, `corpus`,
+`balance`, `coverage`, `recognition`, `realism`, `detection`) - build it nested,
+or use `GenerationConfig.flat(...)` to pass flat keyword names. Any of those
+keywords can also be passed straight to `generate_dataset(...)`:
+
+```python
+from generator import GenerationConfig, CoreConfig, DetectionConfig
+
+# nested - group related options together
+cfg = GenerationConfig(
+    core=CoreConfig(num_images=10_000, task="detection", languages=["en", "de"]),
+    detection=DetectionConfig(layout="newspaper"),
 )
-SyntheticDatasetGenerator(config).generate_dataset()
+
+# ...or flat, routed into the sub-configs for you
+cfg = GenerationConfig.flat(num_images=10_000, task="detection", det_layout="newspaper")
+
+# ...or just the one-liner
+generate_dataset("output_dataset", num_images=10_000, languages=["en", "de"], output_jpeg=True, num_workers=8)
 ```
 
-> The first run downloads word lists and fonts from public mirrors and caches
-> them (`corpus_cache_dir` / `font_cache_dir`). Subsequent runs are offline. To
-> run fully offline from the start, supply your own `wordlist_path` and
-> `font_dir`.
+### Bring your own resources
 
-## Bring your own resources (classic usage)
-
-Supplying a `wordlist_path` and/or `font_dir` still works and takes precedence
-over the automatic downloads:
+`wordlist_path` and/or `font_dir` take precedence over the automatic downloads
+(e.g. the bundled `resources/` or the `fonts_v1` release):
 
 ```python
-config = GenerationConfig(
-    wordlist_path="resources/corpus/latin_ext_balanced_words.txt",
-    font_dir="resources/font",  # e.g. the extracted fonts_v1 release
-    bg_image_dir="resources/background_images",  # bundled with the repo
-    output_dir="output_dataset",
+generate_dataset(
+    "output_dataset",
     num_images=1000,
-    val_percent=0.2,
-    num_workers=6,
-    # If a word contains characters none of your local fonts cover, download a
-    # matching font instead of dropping the word (default: True):
-    auto_download_fonts=True,
+    wordlist_path="resources/corpus/latin_ext_balanced_words.txt",
+    font_dir="resources/font",
+    bg_image_dir="resources/background_images",
 )
-SyntheticDatasetGenerator(config).generate_dataset()
 ```
 
-## Automatic fonts
+## Automatic resources
 
-When no local font covers every character of a word, a matching open-source font
-(from the [Noto](https://fonts.google.com/noto) family, which spans the whole
-Unicode range) is downloaded, verified for coverage and cached. This prevents
-words from being silently skipped - the main cause of biased, latin-only
-datasets. Disable with `auto_download_fonts=False`.
+On the first run anything you don't provide is fetched from public mirrors and
+cached (later runs are offline). Providing your own `font_dir` / `wordlist_path`
+/ `bg_image_dir` takes precedence and skips the matching download.
 
-## Automatic words
-
-When no `wordlist_path` is given, real frequency-ranked words for `languages`
-are downloaded (from the open
-[FrequencyWords](https://github.com/hermitdave/FrequencyWords) project, ~85
-languages) and cleaned (script filtering, length bounds, punctuation removal).
-Two realism helpers are applied by default and can be tuned or disabled:
-
-- `casing_variant_prob` (0.3): adds Title/UPPERCASE variants so the model sees
-  capital letters (frequency lists are almost all lowercase).
-- `numeric_token_ratio` (0.05): mixes in realistic numbers, dates, prices and
-  codes - the kind of content real documents are full of.
-
-## Automatic backgrounds
-
-When no `bg_image_dir` is given, a curated set of background images is downloaded
-and cached automatically (instead of producing blank backgrounds). Supplying your
-own `bg_image_dir` takes precedence and skips the download entirely - exactly like
-fonts and word lists. Disable with `auto_download_backgrounds=False`, point
-`background_cache_dir` somewhere persistent, or pass a `background_manifest_url`
-(a newline-separated list of filenames/URLs) to use a different collection.
+- **Fonts** - when no local font covers every character of a word, a matching
+  open-source [Noto](https://fonts.google.com/noto) font is downloaded, verified
+  and cached, so words are never silently skipped (the usual cause of biased,
+  latin-only datasets). Disable with `auto_download_fonts=False`.
+- **Words** - with no `wordlist_path`, real frequency-ranked words come from
+  [FrequencyWords](https://github.com/hermitdave/FrequencyWords) (~85 languages)
+  and are cleaned (script filter, length bounds, punctuation removal). Two realism
+  helpers are on by default: `casing_variant_prob` (0.3) adds Title/UPPERCASE
+  variants, and `numeric_token_ratio` (0.05) mixes in numbers, dates and prices.
+- **Backgrounds** - with no `bg_image_dir`, a curated background set is downloaded
+  instead of blank pages. Disable with `auto_download_backgrounds=False`, or pass
+  a `background_manifest_url` for your own collection.
 
 ## Dataset balancing
 
@@ -117,7 +128,7 @@ For multilingual runs the language mix is explicit and controllable instead of
 being dominated by whichever language has the most words:
 
 ```python
-config = GenerationConfig(
+config = GenerationConfig.flat(
     output_dir="output_dataset",
     num_images=30000,
     languages=["en", "de", "ru"],
@@ -189,7 +200,7 @@ tokens are synthesised so **every renderable vocab character appears in both the
 train and val splits**:
 
 ```python
-config = GenerationConfig(
+config = GenerationConfig.flat(
     output_dir="dataset",
     num_images=50000,
     languages=["de"],  # mapped to the "german" vocab automatically
@@ -229,7 +240,7 @@ polygon for every word, ready for
 [docTR detection training](https://github.com/mindee/doctr/tree/main/references/detection):
 
 ```python
-config = GenerationConfig(
+config = GenerationConfig.flat(
     task="detection",
     output_dir="detection_dataset",
     num_images=5000,  # = number of pages
@@ -320,7 +331,7 @@ treat them the same: recognition yields the label string; detection yields
 from generator.components import GenerationConfig
 from generator.doctr_dataset import build_detection_datasets, synth_worker_init_fn
 
-cfg = GenerationConfig(
+cfg = GenerationConfig.flat(
     task="detection",
     languages=["en", "de"],
     num_images=50_000,  # POOL size (word variety + vocab coverage)
@@ -342,7 +353,7 @@ train_set, val_set = build_detection_datasets(
 from generator.components import GenerationConfig
 from generator.doctr_dataset import build_recognition_datasets, synth_worker_init_fn
 
-cfg = GenerationConfig(task="recognition", num_images=100_000)
+cfg = GenerationConfig.flat(task="recognition", num_images=100_000)
 train_set, val_set = build_recognition_datasets(
     cfg,
     train_samples=50_000,
@@ -362,7 +373,7 @@ Corpus words outside the vocab are dropped, character coverage is guaranteed
 automatically (`german` -> `de`); a key with no corpus (e.g. `odia`) still has
 its characters covered via synthesis. Set `config.languages` explicitly to pull
 different corpora. The same restriction applies to the offline generator via
-`GenerationConfig(target_vocab=[...])`.
+`GenerationConfig.flat(target_vocab=[...])`.
 
 The `DataLoader` lines stay as they are - just keep
 `collate_fn=train_set.collate_fn` and add `worker_init_fn=synth_worker_init_fn`
@@ -430,8 +441,33 @@ improvement over re-loading them per sample. Memory stays bounded and tunable:
 
 ## Configuration reference
 
-All behaviour is controlled through `GenerationConfig`; see the dataclass
-docstring in `generator/components/config.py` for every field and its default.
+The config is organised into focused sub-configs - `core`, `resources`,
+`corpus`, `balance`, `coverage`, `recognition`, `realism` and `detection` -
+each a small dataclass you can construct on its own. Build `GenerationConfig`
+nested (`GenerationConfig(detection=DetectionConfig(layout="form"))`), or pass
+flat keyword names via `GenerationConfig.flat(...)` / `generate_dataset(...)`,
+which route each keyword into the right sub-config.
+
+Most runs need only a handful of options - the ones you are most likely to set
+(as flat keywords):
+
+| Option | Sub-config | Default | What it does |
+| --- | --- | --- | --- |
+| `output_dir` | core | - | where the dataset is written (`train/`, `val/`) |
+| `num_images` | core | `1000` | total samples (split by `val_percent`) |
+| `task` | core | `"recognition"` | `"recognition"` crops or `"detection"` pages |
+| `languages` | core | `["en"]` | ISO 639-1 codes; resolves words, fonts and shaping |
+| `val_percent` | core | `0.2` | validation fraction |
+| `num_workers` | core | `4` | parallel worker processes |
+| `output_jpeg` | core | `False` | write JPEG instead of PNG |
+| `target_vocab` | coverage | `None` | recognition: restrict labels to a `VOCABS` key / list (the `vocab=` arg) |
+| `det_layout` | detection | `"mixed"` | detection: `mixed`/`paragraph`/`newspaper`/`form`/`id_card` |
+| `language_balance` | balance | `"balanced"` | `"balanced"` or `"proportional"` allocation across languages |
+| `min_char_coverage` | balance | `0` | ensure every character appears >= N times (0 = off) |
+| `wordlist_path` / `font_dir` / `bg_image_dir` | resources | `None` | bring your own resources (skips the matching download) |
+
+For the complete set of options (realism, augmentation and detection-layout
+knobs), see the sub-config dataclasses in `generator/components/config.py`.
 
 ## Resources
 

@@ -18,7 +18,7 @@ def _config(**kw):
         outline_prob=0.0,
     )
     base.update(kw)
-    return GenerationConfig(**base)
+    return GenerationConfig.flat(**base)
 
 
 def test_font_cache_reuse(tiny_font):

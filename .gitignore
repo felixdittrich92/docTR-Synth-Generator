@@ -150,6 +150,7 @@ wandb/
 /detection_dataset
 .corpus_cache
 .font_cache
+.background_cache
 generator/version.py
 
 # Testfiles

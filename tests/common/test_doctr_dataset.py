@@ -42,7 +42,7 @@ def _cfg(font_dir, task, **kw):
         supersample=2,
     )
     base.update(kw)
-    return GenerationConfig(**base)
+    return GenerationConfig.flat(**base)
 
 
 def _det_cfg(font_dir, **kw):

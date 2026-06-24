@@ -51,16 +51,16 @@ class PageGenerator:
     def __init__(self, config: GenerationConfig):
         self.config = config
         self.font_selector = FontSelector(
-            config.font_dir,
-            auto_download=config.auto_download_fonts,
-            font_cache_dir=config.font_cache_dir,
-            download_timeout=config.font_download_timeout,
+            config.resources.font_dir,
+            auto_download=config.resources.auto_download_fonts,
+            font_cache_dir=config.resources.font_cache_dir,
+            download_timeout=config.resources.font_download_timeout,
         )
         self.text_renderer = TextRenderer(config)
         self.background_manager = BackgroundManager(
-            config.bg_image_dir,
-            cache_size=config.bg_cache_size,
-            max_dimension=config.bg_max_dimension,
+            config.resources.bg_image_dir,
+            cache_size=config.resources.bg_cache_size,
+            max_dimension=config.resources.bg_max_dimension,
         )
         self.final_augs = build_final_augmentations(config)
 
@@ -70,18 +70,18 @@ class PageGenerator:
         """Lay out ``words`` on a page and return the page image + word polygons.
 
         The layout (paragraph, dense newspaper columns, a label/value form or an
-        ID-card with fields) is chosen per :attr:`GenerationConfig.det_layout`, so
+        ID-card with fields) is chosen per :attr:`DetectionConfig.layout`, so
         a single run can mimic the variety of real documents.
         """
         cfg = self.config
-        width = random.randint(*cfg.det_page_width_range)
-        height = random.randint(*cfg.det_page_height_range)
+        width = random.randint(*cfg.detection.page_width_range)
+        height = random.randint(*cfg.detection.page_height_range)
         layout = self._choose_layout()
 
         # Detection ground truth only contains the words we place, so any text in
         # a background photo becomes an unlabelled false negative. Forms/ID-cards
         # always use clean generated paper; others mix in textures.
-        if layout in ("form", "id_card") or random.random() < cfg.det_plain_background_prob:
+        if layout in ("form", "id_card") or random.random() < cfg.detection.plain_background_prob:
             page = self._paper_background((width, height)).convert("RGBA")
         else:
             page = self.background_manager.get_page_background((width, height)).convert("RGBA")
@@ -91,7 +91,7 @@ class PageGenerator:
 
         take_word = self._word_supplier(words)
         rtl = self._is_rtl(words)
-        margin = max(4, int(min(width, height) * cfg.det_margin_ratio))
+        margin = max(4, int(min(width, height) * cfg.detection.margin_ratio))
         area = (margin, margin, width - margin, height - margin)
         polygons: list[Polygon] = []
 
@@ -105,8 +105,8 @@ class PageGenerator:
             self._layout_paragraph(page, area, take_word, rtl, polygons)
 
         page = page.convert("RGB")
-        if polygons and random.random() < cfg.det_rotation_prob:
-            angle = random.uniform(*cfg.det_rotation_range)
+        if polygons and random.random() < cfg.detection.rotation_prob:
+            angle = random.uniform(*cfg.detection.rotation_range)
             page, polygons = self._rotate(page, polygons, angle)
 
         page = apply_final_degradations(cfg, page, self.final_augs)
@@ -116,9 +116,9 @@ class PageGenerator:
 
     def _choose_layout(self) -> str:
         cfg = self.config
-        if cfg.det_layout != "mixed":
-            return cfg.det_layout
-        weights = cfg.det_layout_weights or {"paragraph": 0.4, "newspaper": 0.25, "form": 0.2, "id_card": 0.15}
+        if cfg.detection.layout != "mixed":
+            return cfg.detection.layout
+        weights = cfg.detection.layout_weights or {"paragraph": 0.4, "newspaper": 0.25, "form": 0.2, "id_card": 0.15}
         names = list(weights)
         return random.choices(names, weights=[weights[n] for n in names], k=1)[0]
 
@@ -221,17 +221,17 @@ class PageGenerator:
         return y
 
     def _body_font(self) -> int:
-        lo, hi = self.config.det_font_size_range
+        lo, hi = self.config.detection.font_size_range
         return random.randint(lo, max(lo, (lo + hi) // 2))  # smaller end -> denser
 
     def _layout_paragraph(self, page, area, take_word, rtl, polygons) -> None:
         cfg = self.config
         bx0, by0, bx1, by1 = area
         y, blocks = by0, 0
-        while y < by1 and blocks < cfg.det_max_blocks:
+        while y < by1 and blocks < cfg.detection.max_blocks:
             blocks += 1
-            base = random.randint(*cfg.det_font_size_range)
-            heading = random.random() < cfg.det_heading_prob
+            base = random.randint(*cfg.detection.font_size_range)
+            heading = random.random() < cfg.detection.heading_prob
             font_size = int(base * random.uniform(1.4, 1.9)) if heading else base
             bold_width = self._heading_bold(font_size) if heading else self._maybe_bold(font_size)
             style = self._style_at(page, bx0, y, 240, font_size * 2, bold_width)
@@ -240,7 +240,7 @@ class PageGenerator:
             y = self._fill_box(
                 page, (bx0, y, bx1, by1), take_word, polygons, font_size, style, bold_width, rtl, max_lines, indent
             )
-            y += int(font_size * random.uniform(*cfg.det_block_gap_range))
+            y += int(font_size * random.uniform(*cfg.detection.block_gap_range))
 
     def _layout_newspaper(self, page, area, take_word, rtl, polygons) -> None:
         cfg = self.config
@@ -250,7 +250,7 @@ class PageGenerator:
         y = by0
         # Masthead: big paper name, a double rule, then a small dateline.
         if random.random() < 0.92:
-            hfs = int(random.randint(*cfg.det_font_size_range) * random.uniform(2.2, 3.4))
+            hfs = int(random.randint(*cfg.detection.font_size_range) * random.uniform(2.2, 3.4))
             hbw = self._heading_bold(hfs)
             hstyle = self._style_at(page, bx0, y, bx1 - bx0, hfs * 2, hbw)
             y = self._fill_box(
@@ -270,7 +270,7 @@ class PageGenerator:
             y += max(3, int(hfs * 0.12))
             draw.line((bx0, y, bx1, y), fill=rule, width=1)
             y += int(hfs * 0.2)
-            dfs = max(cfg.det_newspaper_font_size_range[1], int(hfs * 0.24))
+            dfs = max(cfg.detection.newspaper_font_size_range[1], int(hfs * 0.24))
             dstyle = self._style_at(page, bx0, y, bx1 - bx0, dfs * 2, 0)
             y = self._fill_box(page, (bx0, y, bx1, by1), take_word, polygons, dfs, dstyle, 0, rtl, max_lines=1)
             y += int(dfs * 0.5)
@@ -278,12 +278,12 @@ class PageGenerator:
             y += int(dfs * 0.5)
 
         # Dense columns with vertical column rules between them.
-        lo, hi = cfg.det_newspaper_columns_range
+        lo, hi = cfg.detection.newspaper_columns_range
         gutter = max(6, int((bx1 - bx0) * 0.02))
         max_cols = max(2, int((bx1 - bx0 + gutter) / (90 + gutter)))  # keep columns legible
         ncols = max(2, min(random.randint(lo, hi), max_cols))
         col_w = ((bx1 - bx0) - (ncols - 1) * gutter) / ncols
-        spacing = cfg.det_newspaper_line_spacing_range
+        spacing = cfg.detection.newspaper_line_spacing_range
         col_top = y
         for c in range(1, ncols):  # column separators sit in the gutters
             sx = int(bx0 + c * (col_w + gutter) - gutter / 2)
@@ -296,7 +296,7 @@ class PageGenerator:
             while cy < by1 and cblocks < 80:
                 cblocks += 1
                 if random.random() < 0.2:  # article headline (+ optional byline)
-                    hfs = int(random.randint(*cfg.det_newspaper_font_size_range) * random.uniform(1.4, 1.9))
+                    hfs = int(random.randint(*cfg.detection.newspaper_font_size_range) * random.uniform(1.4, 1.9))
                     hbw = self._heading_bold(hfs)
                     hstyle = self._style_at(page, cx0, cy, col_w, hfs * 2, hbw)
                     cy = self._fill_box(
@@ -312,7 +312,7 @@ class PageGenerator:
                         line_spacing=(1.1, 1.25),
                     )
                     if random.random() < 0.45:
-                        bfs = max(cfg.det_newspaper_font_size_range[0], int(hfs * 0.55))
+                        bfs = max(cfg.detection.newspaper_font_size_range[0], int(hfs * 0.55))
                         bstyle = self._style_at(page, cx0, cy, col_w, bfs * 2, 0)
                         cy = self._fill_box(
                             page,
@@ -328,7 +328,7 @@ class PageGenerator:
                         )
                     gap = hfs
                 else:  # body paragraph
-                    font_size = random.randint(*cfg.det_newspaper_font_size_range)
+                    font_size = random.randint(*cfg.detection.newspaper_font_size_range)
                     bold_width = self._maybe_bold(font_size)
                     style = self._style_at(page, cx0, cy, col_w, font_size * 2, bold_width)
                     cy = self._fill_box(
@@ -352,7 +352,7 @@ class PageGenerator:
         ink = (90, 90, 100)
         y = by0
         # Title with a header rule underneath.
-        tfs = int(random.randint(*self.config.det_font_size_range) * random.uniform(1.6, 2.2))
+        tfs = int(random.randint(*self.config.detection.font_size_range) * random.uniform(1.6, 2.2))
         tbw = self._heading_bold(tfs)
         tstyle = self._style_at(page, bx0, y, bx1 - bx0, tfs * 2, tbw)
         y = self._fill_box(page, (bx0, y, bx1, by1), take_word, polygons, tfs, tstyle, tbw, rtl, max_lines=1)
@@ -553,13 +553,13 @@ class PageGenerator:
         return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGB")
 
     def _maybe_bold(self, font_size: int) -> int:
-        if random.random() < self.config.bold_prob:
-            frac = random.uniform(*self.config.bold_width_frac_range)
+        if random.random() < self.config.realism.bold_prob:
+            frac = random.uniform(*self.config.realism.bold_width_frac_range)
             return max(1, round(font_size * self.text_renderer.supersample * frac))
         return 0
 
     def _heading_bold(self, font_size: int) -> int:
-        frac = self.config.bold_width_frac_range[1]
+        frac = self.config.realism.bold_width_frac_range[1]
         return max(1, round(font_size * self.text_renderer.supersample * frac))
 
     @staticmethod
@@ -595,8 +595,8 @@ class PageGenerator:
     ):
         """Worker process: render pages and return their polygon annotations."""
         print(f"Detection worker {worker_id} starting...")
-        save_format = "JPEG" if config.output_jpeg else "PNG"
-        save_kwargs = {"quality": config.output_jpeg_quality} if config.output_jpeg else {}
+        save_format = "JPEG" if config.core.output_jpeg else "PNG"
+        save_kwargs = {"quality": config.core.output_jpeg_quality} if config.core.output_jpeg else {}
 
         try:
             generator = PageGenerator(config)

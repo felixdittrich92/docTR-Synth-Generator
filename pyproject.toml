@@ -65,6 +65,9 @@ repository = "https://github.com/felixdittrich92/docTR-Synth-Generator"
 tracker = "https://github.com/felixdittrich92/docTR-Synth-Generator/issues"
 changelog = "https://github.com/felixdittrich92/docTR-Synth-Generator/releases"
 
+[project.scripts]
+doctr-synth = "generator.__main__:main"
+
 [tool.setuptools]
 zip-safe = true
 

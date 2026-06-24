@@ -52,16 +52,19 @@ class TextRenderer:
 
     def __init__(self, config: GenerationConfig):
         self.config = config
-        self.supersample = max(1, int(config.supersample))
+        self.supersample = max(1, int(config.realism.supersample))
 
         ss = self.supersample
         self.geometry_augs = AugmentationPipeline([
-            RandomRotate(angle_range=config.rotation_range, prob=config.rotation_prob),
-            RandomPerspective(margin=config.perspective_margin * ss, prob=config.perspective_prob),
+            RandomRotate(angle_range=config.realism.rotation_range, prob=config.realism.rotation_prob),
+            RandomPerspective(margin=config.realism.perspective_margin * ss, prob=config.realism.perspective_prob),
         ])
         self.detail_augs = AugmentationPipeline([
-            RandomPixelDropout(pixel_dropout_range=config.pixel_dropout_range, prob=config.pixel_dropout_prob),
-            RandomBlur(radius_range=config.blur_radius_range, prob=config.blur_prob),
+            RandomPixelDropout(
+                pixel_dropout_range=config.realism.pixel_dropout_range,
+                prob=config.realism.pixel_dropout_prob,
+            ),
+            RandomBlur(radius_range=config.realism.blur_radius_range, prob=config.realism.blur_prob),
         ])
 
         self._font_cache: OrderedDict[tuple[str, int], ImageFont.FreeTypeFont] = OrderedDict()
@@ -88,17 +91,17 @@ class TextRenderer:
         size, turning words into unreadable blobs; scaling with the font keeps
         the weight legible across the whole ``font_size_range``.
         """
-        font_size = random.randint(*self.config.font_size_range)
+        font_size = random.randint(*self.config.recognition.font_size_range)
         fs_ss = font_size * self.supersample
 
         bold_width = 0
-        if random.random() < self.config.bold_prob:
-            frac = random.uniform(*self.config.bold_width_frac_range)
+        if random.random() < self.config.realism.bold_prob:
+            frac = random.uniform(*self.config.realism.bold_width_frac_range)
             bold_width = max(1, round(fs_ss * frac))
 
         outline_width = 0
-        if random.random() < self.config.outline_prob:
-            frac = random.uniform(*self.config.outline_width_frac_range)
+        if random.random() < self.config.realism.outline_prob:
+            frac = random.uniform(*self.config.realism.outline_width_frac_range)
             outline_width = max(1, round(fs_ss * frac))
         return font_size, bold_width, outline_width
 
@@ -106,14 +109,14 @@ class TextRenderer:
         """Approximate the rendered (target-resolution) size (kept for compatibility)."""
         font = self._get_font(font_path, font_size)
         left, top, right, bottom = font.getbbox(text)
-        width = int((right - left) + 2 * self.config.padding)
-        height = int((bottom - top) + 2 * self.config.padding)
+        width = int((right - left) + 2 * self.config.recognition.padding)
+        height = int((bottom - top) + 2 * self.config.recognition.padding)
         return max(1, width), max(1, height)
 
     def _draw(self, text: str, font_path: str, font_size: int, style: TextStyle) -> Image.Image:
         """Draw the styled glyph at the supersampled scale (no augmentation yet)."""
         ss = self.supersample
-        pad = self.config.padding * ss
+        pad = self.config.recognition.padding * ss
         font = self._get_font(font_path, font_size * ss)
 
         stroke = max(style.bold_width, style.outline_width)

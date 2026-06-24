@@ -3,244 +3,204 @@
 # This program is licensed under the Apache License 2.0.
 # See LICENSE or go to <https://opensource.org/licenses/Apache-2.0> for full license details.
 
-from dataclasses import dataclass
+from __future__ import annotations
 
-__all__ = ["GenerationConfig"]
+import dataclasses
+from dataclasses import dataclass, field
+
+__all__ = [
+    "GenerationConfig",
+    "CoreConfig",
+    "ResourceConfig",
+    "CorpusConfig",
+    "BalanceConfig",
+    "CoverageConfig",
+    "RecognitionConfig",
+    "RealismConfig",
+    "DetectionConfig",
+]
 
 
 @dataclass
-class GenerationConfig:
-    """Configuration for dataset generation.
-
-    Both the source text and the fonts can be supplied locally *or* downloaded
-    automatically, so a minimal run needs nothing but an output directory:
-
-        >>> GenerationConfig(output_dir="ds", num_images=1000)          # en words + auto fonts
-        >>> GenerationConfig(output_dir="ds", num_images=1000, languages=["de", "ru"])
+class CoreConfig:
+    """What to produce and where.
 
     Attributes:
-        wordlist_path (str | None): Path to a wordlist file. If ``None`` (the
-            default), real words are downloaded for ``languages`` instead.
-        languages (list[str] | None): ISO 639-1 codes whose real word corpora are
-            downloaded when no ``wordlist_path`` is given. Defaults to ``["en"]``.
-        font_dir (str | None): Directory with TTF/OTF fonts. May be ``None`` when
-            relying on ``auto_download_fonts`` (which defaults to True).
-        output_dir (str): Directory to save generated images.
-        num_images (int): Total number of images to generate.
-        bg_image_dir (str | None): Directory containing background images. If
-            ``None`` and ``auto_download_backgrounds`` is set, a curated set is
-            downloaded automatically (otherwise blank backgrounds are used).
-        auto_download_backgrounds (bool): Download a curated background set when
-            no ``bg_image_dir`` is given. Default True.
-        background_cache_dir (str | None): Where to cache downloaded backgrounds.
-        background_manifest_url (str | None): Optional URL of a newline-separated
-            list of background filenames/URLs to use instead of the default set.
-        val_percent (float): Percentage of images for the validation set.
-        num_workers (int): Number of worker processes for parallel processing.
-        font_size_range (tuple[int, int]): Range of font sizes to use.
-        padding (int): Padding around the text in the image.
-        max_attempts (int): Maximum attempts to render visible text.
-        queue_maxsize (int): Limit on the size of the processing queue.
-
-        # --- Automatic corpus (word) downloading ---
-        words_per_language (int): Max words taken per language (most frequent kept).
-        corpus_cache_dir (str | None): Where to cache downloaded corpora.
-        min_word_length (int): Minimum word length (characters) to keep.
-        max_word_length (int): Maximum word length (characters) to keep.
-        corpus_filter_by_script (bool): Drop words whose script does not match the
-            requested language (removes foreign-script contamination).
-        casing_variant_prob (float): Probability of adding a Title/UPPER variant
-            per word, so capital glyphs are represented (cased scripts only).
-        numeric_token_ratio (float): Fraction of the vocabulary to additionally
-            fill with realistic numeric/date/price/code tokens (0 disables).
-        corpus_seed (int | None): Optional RNG seed for reproducible vocabularies.
-
-        # --- Dataset balancing ---
-        language_balance (str): How to split the image budget across languages:
-            ``"balanced"`` (equal per language, default) or ``"proportional"``
-            (by available word count). Ignored if ``language_weights`` is set.
-        language_weights (dict[str, float] | None): Explicit per-language weights,
-            e.g. ``{"en": 0.5, "de": 0.3, "ru": 0.2}`` (need not sum to 1).
-        min_char_coverage (int): If > 0, ensure each character appears at least
-            this many times across the dataset (best-effort, bounded).
-        print_balance_report (bool): Print a summary of the resulting distribution.
-        ensure_vocab_coverage (bool): For recognition, synthesise extra word-like
-            tokens so every character of the target language vocab (docTR
-            ``VOCABS``) appears, even when the real corpus lacks it. Default True;
-            a no-op for languages with no fixed small vocab (e.g. CJK).
-        target_vocab: Override the vocab to cover and to restrict labels to - a
-            ``VOCABS`` key (e.g. ``"german"``), a literal string of characters,
-            or a list of those (their union, e.g. ``["german", "urdu", "odia"]``).
-            Applies to all languages when set; otherwise each language maps to
-            its own vocab.
-        restrict_to_vocab (bool): For recognition, drop any generated word that
-            contains a character outside ``target_vocab`` so every label can be
-            encoded by a docTR model trained on that exact vocab (otherwise
-            training crashes on the first out-of-vocab character). Default True;
-            only takes effect when ``target_vocab`` is set.
-        vocab_coverage_min_count (int): Minimum samples each vocab character must
-            appear in (drives both synthesis and the final coverage top-up).
-
-        # --- Automatic font downloading ---
-        auto_download_fonts (bool): Download a matching open-source font when no
-            local font covers a word (instead of skipping it). Default True.
-        font_cache_dir (str | None): Where to cache downloaded fonts.
-        font_download_timeout (int): Per-request download timeout in seconds.
-
-        # --- Glyph rendering realism ---
-        supersample (int): Render at this integer scale then downsample for clean
-            anti-aliasing. 1 disables.
-        text_opacity_range (tuple[int, int]): Range of glyph alpha (0-255).
-        ink_color_jitter (float): Per-channel std-dev of ink colour jitter.
-        colored_ink_prob (float): Probability of colourful (vs near-neutral) ink.
-        outline_prob (float): Probability of a contrasting glyph outline.
-        outline_width_frac_range (tuple[float, float]): Outline stroke width as a
-            fraction of the font size (proportional, like bold).
-
-        # --- Text/background contrast ---
-        min_contrast (float): Lower bound of ink-vs-background contrast [0, 1].
-        max_contrast (float): Upper bound of ink-vs-background contrast.
-        invert_prob (float): Probability of inverting polarity on mid-tone bgs.
-
-        # --- Glyph-space augmentation probabilities ---
-        bold_prob (float): Probability of faux-bold glyphs.
-        bold_width_frac_range (tuple[float, float]): Faux-bold stroke width as a
-            fraction of the font size (kept proportional so small text stays
-            readable instead of blobbing).
-        rotation_prob (float): Probability of applying rotation.
-        blur_prob (float): Probability of a glyph blur.
-        perspective_prob (float): Probability of perspective distortion.
-        pixel_dropout_prob (float): Probability of ink-erosion pixel dropout.
-
-        # --- Glyph-space augmentation parameters ---
-        rotation_range (tuple[float, float]): Range of rotation angles.
-        blur_radius_range (tuple[float, float]): Range of glyph blur radius.
-        perspective_margin (int): Margin for perspective distortion.
-        pixel_dropout_range (tuple[float, float]): Fraction-of-ink dropout range.
-
-        # --- Image-space (post-composite) degradations ---
-        final_blur_prob (float): Probability of blurring the whole composited crop.
-        final_blur_radius_range (tuple[float, float]): Radius range for that blur.
-        noise_prob (float): Probability of adding Gaussian sensor noise.
-        noise_std_range (tuple[float, float]): Std-dev range of the sensor noise.
-        jpeg_prob (float): Probability of JPEG compression artifacts.
-        jpeg_quality_range (tuple[int, int]): JPEG quality factor range (1-100).
-        brightness_jitter (float): Max relative brightness change.
-        contrast_jitter (float): Max relative contrast change.
-        output_jpeg (bool): Save samples as JPEG instead of PNG.
-        output_jpeg_quality (int): Quality used when ``output_jpeg`` is True.
-
-        # --- Detection dataset (task="detection") ---
-        task (str): ``"recognition"`` (word/line crops, default) or
-            ``"detection"`` (document-like pages with per-word polygons, in the
-            docTR detection labels.json format).
-        det_page_width_range (tuple[int, int]): Page width range in pixels.
-        det_page_height_range (tuple[int, int]): Page height range in pixels.
-        det_font_size_range (tuple[int, int]): Body font size range on a page.
-        det_max_words_per_page (int): Candidate words supplied per page. The page
-            is filled top-to-bottom with as many as fit, so this should be
-            generous enough to fill a full page at small font sizes.
-        det_margin_ratio (float): Page margin as a fraction of min(width, height).
-        det_block_gap_range (tuple[float, float]): Gap between paragraph blocks as
-            a fraction of the line height.
-        det_layout (str): Page layout for detection: "mixed" (default, a
-            weighted blend), "paragraph", "newspaper" (dense multi-column),
-            "form" (label/value rows) or "id_card" (card with fields + photo).
-        det_layout_weights (dict[str, float] | None): Weights for "mixed".
-        det_newspaper_columns_range (tuple[int, int]): Min/max column count for
-            newspaper pages (more columns -> denser). Clamped to the page width.
-        det_newspaper_font_size_range (tuple[int, int]): Body text size for
-            newspaper columns - small by default for dense newsprint.
-        det_newspaper_line_spacing_range (tuple[float, float]): Line-height
-            multiplier for newspaper body text (tight by default).
-        det_max_blocks (int): Safety cap on paragraph blocks per page (the real
-            limit is the available vertical space).
-        det_heading_prob (float): Probability a block starts as a larger heading.
-        det_plain_background_prob (float): Probability of using a clean generated
-            paper background instead of a texture image. Texture photos that
-            contain their own text would add unlabelled (false-negative) words,
-            so for detection prefer text-free backgrounds or generated paper.
-        det_rotation_prob (float): Probability of a small global page rotation.
-        det_rotation_range (tuple[float, float]): Page rotation angle range (deg).
+        task: ``"recognition"`` (word/line crops) or ``"detection"`` (pages).
+        output_dir: directory the dataset is written to.
+        num_images: total images (split into train/val by ``val_percent``).
+        languages: ISO 639-1 codes whose corpora are downloaded when no
+            ``resources.wordlist_path`` is given. Defaults to ``["en"]``.
+        val_percent: fraction of images held out for validation.
+        num_workers: worker processes for parallel generation.
+        max_attempts: max attempts to render visible text for a sample.
+        queue_maxsize: bound on the multiprocessing work queue.
+        output_jpeg: save samples as JPEG instead of PNG.
+        output_jpeg_quality: JPEG quality used when ``output_jpeg`` is True.
     """
 
-    # Text source (wordlist OR downloaded corpus). All optional => no wordlist required.
-    wordlist_path: str | None = None
-    languages: list[str] | None = None
-
-    # Fonts (local dir OR downloaded). Optional => no font dir required.
-    font_dir: str | None = None
-
+    task: str = "recognition"
     output_dir: str = "output_dataset"
     num_images: int = 1000
-    bg_image_dir: str | None = None
-    bg_cache_size: int = 16
-    bg_max_dimension: int = 2000
-    auto_download_backgrounds: bool = True
-    background_cache_dir: str | None = None
-    background_manifest_url: str | None = None
+    languages: list[str] | None = None
     val_percent: float = 0.2
     num_workers: int = 4
-    font_size_range: tuple[int, int] = (15, 40)
-    padding: int = 4
     max_attempts: int = 5
     queue_maxsize: int = 100
+    output_jpeg: bool = False
+    output_jpeg_quality: int = 90
 
-    # Automatic corpus downloading
-    words_per_language: int = 50000
+
+@dataclass
+class ResourceConfig:
+    """Where words, fonts and backgrounds come from (local or downloaded).
+
+    Local paths take precedence over the matching automatic download.
+
+    Attributes:
+        wordlist_path: path to a wordlist file (else corpora are downloaded).
+        font_dir: directory with TTF/OTF fonts (else fonts are downloaded).
+        bg_image_dir: directory with background images (else downloaded/blank).
+        auto_download_fonts: fetch a covering font when no local font matches.
+        auto_download_backgrounds: fetch a curated background set if none given.
+        font_cache_dir / corpus_cache_dir / background_cache_dir: cache dirs.
+        font_download_timeout: per-request font download timeout (seconds).
+        background_manifest_url: optional newline-separated list of background
+            filenames/URLs to use instead of the default set.
+        bg_cache_size: number of decoded backgrounds kept in memory.
+        bg_max_dimension: backgrounds larger than this are downscaled.
+    """
+
+    wordlist_path: str | None = None
+    font_dir: str | None = None
+    bg_image_dir: str | None = None
+    auto_download_fonts: bool = True
+    auto_download_backgrounds: bool = True
+    font_cache_dir: str | None = None
     corpus_cache_dir: str | None = None
+    background_cache_dir: str | None = None
+    font_download_timeout: int = 30
+    background_manifest_url: str | None = None
+    bg_cache_size: int = 16
+    bg_max_dimension: int = 2000
+
+
+@dataclass
+class CorpusConfig:
+    """Cleaning and enrichment of downloaded word corpora.
+
+    Attributes:
+        words_per_language: max words kept per language (most frequent first).
+        min_word_length / max_word_length: length bounds (characters).
+        filter_by_script: drop words whose script doesn't match the language.
+        casing_variant_prob: probability of adding a Title/UPPER variant per word.
+        numeric_token_ratio: fraction of the vocab filled with numbers/dates/codes.
+        seed: optional RNG seed for reproducible vocabularies.
+    """
+
+    words_per_language: int = 50000
     min_word_length: int = 1
     max_word_length: int = 24
-    corpus_filter_by_script: bool = True
+    filter_by_script: bool = True
     casing_variant_prob: float = 0.3
     numeric_token_ratio: float = 0.05
-    corpus_seed: int | None = None
+    seed: int | None = None
 
-    # Dataset balancing
+
+@dataclass
+class BalanceConfig:
+    """How the image budget is split across languages.
+
+    Attributes:
+        language_balance: ``"balanced"`` (equal) or ``"proportional"`` (by word
+            count). Ignored when ``language_weights`` is set.
+        language_weights: explicit per-language weights (need not sum to 1).
+        min_char_coverage: if > 0, ensure each character appears >= N times.
+        print_balance_report: print a summary of the resulting distribution.
+    """
+
     language_balance: str = "balanced"
     language_weights: dict[str, float] | None = None
     min_char_coverage: int = 0
     print_balance_report: bool = True
 
-    # Vocabulary coverage (recognition)
+
+@dataclass
+class CoverageConfig:
+    """Recognition vocab coverage and restriction.
+
+    Attributes:
+        ensure_vocab_coverage: synthesise tokens so every character of the target
+            vocab appears (a no-op for scripts with no fixed small vocab, e.g. CJK).
+        target_vocab: vocab to cover *and* restrict labels to - a ``VOCABS`` key,
+            a literal charset, or a list of those (their union).
+        restrict_to_vocab: drop any word with a character outside ``target_vocab``
+            so a docTR model trained on that vocab never sees an un-encodable
+            label. Takes effect only when ``target_vocab`` is set.
+        vocab_coverage_min_count: minimum samples each vocab character must appear in.
+    """
+
     ensure_vocab_coverage: bool = True
-    target_vocab: "str | list[str] | None" = None
+    target_vocab: str | list[str] | None = None
     restrict_to_vocab: bool = True
     vocab_coverage_min_count: int = 3
 
-    # Automatic font downloading
-    auto_download_fonts: bool = True
-    font_cache_dir: str | None = None
-    font_download_timeout: int = 30
 
-    # Glyph rendering realism
+@dataclass
+class RecognitionConfig:
+    """Recognition crop geometry.
+
+    Attributes:
+        font_size_range: range of font sizes for recognition crops.
+        padding: padding (pixels) around the text in a crop.
+    """
+
+    font_size_range: tuple[int, int] = (15, 40)
+    padding: int = 4
+
+
+@dataclass
+class RealismConfig:
+    """Rendering realism: ink, contrast, glyph augmentation and degradations.
+
+    Attributes:
+        supersample: render at this integer scale then downsample (1 disables).
+        text_opacity_range: glyph alpha range (0-255).
+        ink_color_jitter: per-channel std-dev of ink colour jitter.
+        colored_ink_prob: probability of colourful (vs near-neutral) ink.
+        outline_prob / outline_width_frac_range: contrasting glyph outline.
+        min_contrast / max_contrast: ink-vs-background contrast bounds [0, 1].
+        invert_prob: probability of inverting polarity on mid-tone backgrounds.
+        bold_prob / bold_width_frac_range: faux-bold probability and stroke width.
+        rotation_prob / rotation_range: glyph rotation.
+        blur_prob / blur_radius_range: glyph blur.
+        perspective_prob / perspective_margin: glyph perspective distortion.
+        pixel_dropout_prob / pixel_dropout_range: ink-erosion dropout.
+        final_blur_prob / final_blur_radius_range: whole-crop blur.
+        noise_prob / noise_std_range: Gaussian sensor noise.
+        jpeg_prob / jpeg_quality_range: JPEG compression artifacts.
+        brightness_jitter / contrast_jitter: max relative brightness/contrast change.
+    """
+
     supersample: int = 3
     text_opacity_range: tuple[int, int] = (200, 255)
     ink_color_jitter: float = 12.0
     colored_ink_prob: float = 0.25
     outline_prob: float = 0.05
     outline_width_frac_range: tuple[float, float] = (0.02, 0.045)
-
-    # Text/background contrast
     min_contrast: float = 0.45
     max_contrast: float = 0.95
     invert_prob: float = 0.15
-
-    # Glyph-space augmentation probabilities
     bold_prob: float = 0.3
     bold_width_frac_range: tuple[float, float] = (0.03, 0.06)
     rotation_prob: float = 0.6
     blur_prob: float = 0.2
     perspective_prob: float = 0.3
     pixel_dropout_prob: float = 0.15
-
-    # Glyph-space augmentation parameters
     rotation_range: tuple[float, float] = (-2, 2)
     blur_radius_range: tuple[float, float] = (0.3, 1.0)
     perspective_margin: int = 2
     pixel_dropout_range: tuple[float, float] = (0.1, 0.2)
-
-    # Image-space (post-composite) degradations
     final_blur_prob: float = 0.15
     final_blur_radius_range: tuple[float, float] = (0.3, 1.2)
     noise_prob: float = 0.25
@@ -249,32 +209,116 @@ class GenerationConfig:
     jpeg_quality_range: tuple[int, int] = (35, 92)
     brightness_jitter: float = 0.12
     contrast_jitter: float = 0.12
-    output_jpeg: bool = False
-    output_jpeg_quality: int = 90
 
-    # Detection dataset (task="detection")
-    task: str = "recognition"
-    det_page_width_range: tuple[int, int] = (700, 1100)
-    det_page_height_range: tuple[int, int] = (900, 1500)
-    det_font_size_range: tuple[int, int] = (14, 32)
-    det_max_words_per_page: int = 600
-    det_margin_ratio: float = 0.06
-    det_block_gap_range: tuple[float, float] = (0.5, 1.5)
-    det_layout: str = "mixed"
-    det_layout_weights: dict[str, float] | None = None
-    # Newspaper density controls (denser = more/narrower columns, smaller body
-    # text, tighter line spacing).
-    det_newspaper_columns_range: tuple[int, int] = (3, 6)
-    det_newspaper_font_size_range: tuple[int, int] = (9, 15)
-    det_newspaper_line_spacing_range: tuple[float, float] = (1.05, 1.2)
-    det_max_blocks: int = 60
-    det_heading_prob: float = 0.3
-    det_plain_background_prob: float = 0.4
-    det_rotation_prob: float = 0.3
-    det_rotation_range: tuple[float, float] = (-2.5, 2.5)
+
+@dataclass
+class DetectionConfig:
+    """Detection page layout (``task="detection"``).
+
+    Attributes:
+        page_width_range / page_height_range: page size range in pixels.
+        font_size_range: body font size range on a page.
+        max_words_per_page: candidate words per page (the page fills top-to-bottom).
+        margin_ratio: page margin as a fraction of min(width, height).
+        block_gap_range: gap between paragraph blocks (fraction of line height).
+        layout: ``"mixed"`` (default), ``"paragraph"``, ``"newspaper"``,
+            ``"form"`` or ``"id_card"``.
+        layout_weights: weights for the ``"mixed"`` blend.
+        newspaper_columns_range / newspaper_font_size_range /
+            newspaper_line_spacing_range: newspaper density controls.
+        max_blocks: safety cap on paragraph blocks per page.
+        heading_prob: probability a block starts as a larger heading.
+        plain_background_prob: probability of a clean generated paper background
+            (texture photos may carry their own unlabelled text).
+        rotation_prob / rotation_range: small global page rotation.
+    """
+
+    page_width_range: tuple[int, int] = (700, 1100)
+    page_height_range: tuple[int, int] = (900, 1500)
+    font_size_range: tuple[int, int] = (14, 32)
+    max_words_per_page: int = 600
+    margin_ratio: float = 0.06
+    block_gap_range: tuple[float, float] = (0.5, 1.5)
+    layout: str = "mixed"
+    layout_weights: dict[str, float] | None = None
+    newspaper_columns_range: tuple[int, int] = (3, 6)
+    newspaper_font_size_range: tuple[int, int] = (9, 15)
+    newspaper_line_spacing_range: tuple[float, float] = (1.05, 1.2)
+    max_blocks: int = 60
+    heading_prob: float = 0.3
+    plain_background_prob: float = 0.4
+    rotation_prob: float = 0.3
+    rotation_range: tuple[float, float] = (-2.5, 2.5)
+
+
+# Sub-config attribute name -> dataclass type.
+_GROUP_TYPES = {
+    "core": CoreConfig,
+    "resources": ResourceConfig,
+    "corpus": CorpusConfig,
+    "balance": BalanceConfig,
+    "coverage": CoverageConfig,
+    "recognition": RecognitionConfig,
+    "realism": RealismConfig,
+    "detection": DetectionConfig,
+}
+
+# Flat keyword name -> (sub-config attr, field name). Auto-built from the
+# dataclasses so it stays in sync; detection fields get a ``det_`` prefix and a
+# couple of corpus fields keep their historical, fully-qualified names.
+_FLAT_RENAMES = {
+    ("corpus", "filter_by_script"): "corpus_filter_by_script",
+    ("corpus", "seed"): "corpus_seed",
+}
+_FLAT_MAP: dict[str, tuple[str, str]] = {}
+for _group, _type in _GROUP_TYPES.items():
+    for _f in dataclasses.fields(_type):
+        if _group == "detection":
+            _flat = f"det_{_f.name}"
+        else:
+            _flat = _FLAT_RENAMES.get((_group, _f.name), _f.name)
+        _FLAT_MAP[_flat] = (_group, _f.name)
+
+
+@dataclass
+class GenerationConfig:
+    """Top-level configuration, composed of focused sub-configs.
+
+    See the sub-config classes for the individual options. Build it nested, or
+    use :meth:`flat` to pass flat keyword names.
+    """
+
+    core: CoreConfig = field(default_factory=CoreConfig)
+    resources: ResourceConfig = field(default_factory=ResourceConfig)
+    corpus: CorpusConfig = field(default_factory=CorpusConfig)
+    balance: BalanceConfig = field(default_factory=BalanceConfig)
+    coverage: CoverageConfig = field(default_factory=CoverageConfig)
+    recognition: RecognitionConfig = field(default_factory=RecognitionConfig)
+    realism: RealismConfig = field(default_factory=RealismConfig)
+    detection: DetectionConfig = field(default_factory=DetectionConfig)
 
     def __post_init__(self):
-        # When neither a wordlist nor explicit languages are given, default to
-        # English so a bare config "just works" without any local resources.
-        if self.wordlist_path is None and self.languages is None:
-            self.languages = ["en"]
+        # With neither a wordlist nor explicit languages, default to English so a
+        # bare config "just works" without any local resources.
+        if self.resources.wordlist_path is None and self.core.languages is None:
+            self.core.languages = ["en"]
+
+    @classmethod
+    def flat(cls, **kwargs) -> "GenerationConfig":
+        """Build a config from flat keyword names, routed into the sub-configs.
+
+        Example::
+
+            GenerationConfig.flat(num_images=1000, task="detection", det_layout="form")
+
+        Raises:
+            TypeError: if a keyword is not a known configuration option.
+        """
+        grouped: dict[str, dict] = {g: {} for g in _GROUP_TYPES}
+        for key, value in kwargs.items():
+            mapping = _FLAT_MAP.get(key)
+            if mapping is None:
+                raise TypeError(f"Unknown configuration option: {key!r}")
+            group, field_name = mapping
+            grouped[group][field_name] = value
+        return cls(**{g: _GROUP_TYPES[g](**vals) for g, vals in grouped.items() if vals})

@@ -1,6 +1,9 @@
 from .vocabs import VOCABS
 from .vocab_coverage import LANGUAGE_TO_VOCAB, augment_words_for_coverage, resolve_target_vocab
-from .config import GenerationConfig
+from .config import (
+    GenerationConfig, CoreConfig, ResourceConfig, CorpusConfig, BalanceConfig,
+    CoverageConfig, RecognitionConfig, RealismConfig, DetectionConfig,
+)
 from .generator import TextImageGenerator, GenerationTask
 from .font_selector import FontSelector
 from .font_downloader import FontDownloader
@@ -19,6 +22,14 @@ __all__ = [
     "resolve_target_vocab",
     "augment_words_for_coverage",
     "GenerationConfig",
+    "CoreConfig",
+    "ResourceConfig",
+    "CorpusConfig",
+    "BalanceConfig",
+    "CoverageConfig",
+    "RecognitionConfig",
+    "RealismConfig",
+    "DetectionConfig",
     "TextImageGenerator",
     "GenerationTask",
     "FontSelector",

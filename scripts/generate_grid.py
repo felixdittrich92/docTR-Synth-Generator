@@ -178,7 +178,7 @@ def build_grid(out_path: str, seed: int = 0):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Render an example grid (detection pages + recognition crops).")
-    ap.add_argument("-o", "--out", default="docs/examples_grid.png", help="output PNG path")
+    ap.add_argument("-o", "--out", default="docs/examples_grid_x.png", help="output PNG path")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

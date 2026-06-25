@@ -15,6 +15,13 @@ __all__ = ["CorpusDownloader"]
 
 _FW_BASE = "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018"
 
+# Secondary source: ~5k most-frequent words for 109 languages, one word per line.
+# Fills the languages hermitdave lacks (Odia, Khmer, Burmese, most Indic/SE-Asian
+# scripts, ...) so far fewer vocabs fall back to pure synthesis.
+_FW2_BASE = "https://raw.githubusercontent.com/frekwencja/most-common-words-multilingual/main/data/wordfrequency.info"
+# A few codes differ from ISO 639-1 in the secondary source.
+_FW2_ALIASES = {"zh": "zh-CN"}
+
 # Some languages live under a different code or only ship a ``_full`` list.
 _LANG_ALIASES: dict[str, list[str]] = {
     "zh": ["zh_cn", "zh_tw"],
@@ -67,6 +74,25 @@ _LANG_SCRIPTS: dict[str, set[str]] = {
     "ja": {"japanese", "cjk"},
     "ko": {"korean"},
     "zh": {"cjk"},
+    # Languages served mainly by the secondary source - listed so the script
+    # filter drops foreign (usually Latin) strays from those frequency lists.
+    "bn": {"bengali"},
+    "as": {"bengali"},
+    "or": {"oriya"},
+    "my": {"myanmar"},
+    "km": {"khmer"},
+    "lo": {"lao"},
+    "si": {"sinhala"},
+    "ta": {"tamil"},
+    "te": {"telugu"},
+    "kn": {"kannada"},
+    "ml": {"malayalam"},
+    "pa": {"gurmukhi"},
+    "gu": {"gujarati"},
+    "ne": {"devanagari"},
+    "ka": {"georgian"},
+    "hy": {"armenian"},
+    "am": {"ethiopic"},
 }
 
 _DOWNLOAD_LOCK = threading.Lock()
@@ -89,6 +115,7 @@ class CorpusDownloader:
         self,
         cache_dir: str,
         source_base_url: str = _FW_BASE,
+        secondary_base_url: str = _FW2_BASE,
         timeout: int = 30,
         min_word_length: int = 1,
         max_word_length: int = 24,
@@ -96,6 +123,7 @@ class CorpusDownloader:
     ):
         self.cache_dir = cache_dir
         self.source_base_url = source_base_url.rstrip("/")
+        self.secondary_base_url = secondary_base_url.rstrip("/") if secondary_base_url else None
         self.timeout = timeout
         self.min_word_length = min_word_length
         self.max_word_length = max_word_length
@@ -114,30 +142,55 @@ class CorpusDownloader:
             paths.append(f"{code}/{code}_full.txt")
         return paths
 
+    def _fetch_url(self, url: str) -> bytes | None:
+        """GET a URL, returning its bytes (or None on any failure/empty)."""
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "docTR-Synth-Generator"})
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = resp.read()
+            return data or None
+        except Exception:
+            return None
+
     def _download_raw(self, language: str) -> str | None:
-        """Download the raw frequency list text for a language (cached on disk)."""
+        """Download the raw frequency list text for a language (cached on disk).
+
+        Tries the primary mirror (hermitdave) first, then the secondary mirror
+        (frekwencja) for the many languages hermitdave does not cover.
+        """
         local_path = os.path.join(self.cache_dir, f"{language}_freq.txt")
         if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
             with open(local_path, "r", encoding="utf-8", errors="replace") as fh:
                 return fh.read()
 
+        # Primary: hermitdave (``word count`` per line).
         for rel in self._candidate_paths(language):
-            url = f"{self.source_base_url}/{rel}"
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "docTR-Synth-Generator"})
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    data = resp.read()
-                if not data:
-                    continue
-                fd, tmp = tempfile.mkstemp(dir=self.cache_dir, suffix=".part")
-                with os.fdopen(fd, "wb") as fh:
-                    fh.write(data)
-                os.replace(tmp, local_path)
+            data = self._fetch_url(f"{self.source_base_url}/{rel}")
+            if data:
+                self._cache_to_disk(local_path, data)
                 return data.decode("utf-8", "replace")
-            except Exception:
-                continue
+
+        # Secondary: frekwencja (one word per line, with a leading code line).
+        if self.secondary_base_url:
+            code = _FW2_ALIASES.get(language, language)
+            data = self._fetch_url(f"{self.secondary_base_url}/{code}.txt")
+            if data:
+                text = data.decode("utf-8", "replace")
+                lines = text.splitlines()
+                if lines and lines[0].strip() in {code, language}:  # drop the header line
+                    text = "\n".join(lines[1:])
+                self._cache_to_disk(local_path, text.encode("utf-8"))
+                return text
+
         print(f"CorpusDownloader: no frequency list found for language '{language}'")
         return None
+
+    def _cache_to_disk(self, local_path: str, data: bytes) -> None:
+        """Atomically write downloaded bytes to the on-disk cache."""
+        fd, tmp = tempfile.mkstemp(dir=self.cache_dir, suffix=".part")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, local_path)
 
     def _clean(self, raw: str, language: str) -> list[str]:
         """Parse and filter the raw ``word count`` lines into a clean word list."""

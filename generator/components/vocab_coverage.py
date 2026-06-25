@@ -57,6 +57,7 @@ LANGUAGE_TO_VOCAB: dict[str, str] = {
     "lv": "latvian",
     "mk": "macedonian",
     "ml": "malayalam",
+    "ms": "malay",
     "mr": "marathi",
     "mt": "maltese",
     "my": "burmese",
@@ -186,6 +187,47 @@ def _is_virama(char: str) -> bool:
     return unicodedata.combining(char) == 9
 
 
+# Thai/Lao vowels that are stored before their consonant in logical order and
+# render to its left (Unicode "Logical_Order_Exception"). On their own they make
+# an incomplete syllable, so a synthesised token must keep a consonant after them.
+_PREBASE_VOWELS = set("\u0e40\u0e41\u0e42\u0e43\u0e44\u0ec0\u0ec1\u0ec2\u0ec3\u0ec4")
+
+
+def _is_prebase_vowel(char: str) -> bool:
+    """True for Thai/Lao left-reordering vowels that must precede a consonant."""
+    return char in _PREBASE_VOWELS
+
+
+# Representative base consonant per script, keyed by the script name returned by
+# ``_script_of``. Used only as a fallback when a target charset contains combining
+# marks of a script but none of that script's base letters (e.g. the
+# ``*_matras`` / ``*_virama`` building-block vocabs): a matra or virama cannot
+# render alone, so we scaffold it on a valid same-script consonant.
+_CARRIER: dict[str, list[str]] = {
+    "ARABIC": ["\u0628"],  # beh
+    "HEBREW": ["\u05d1"],  # bet
+    "DEVANAGARI": ["\u0915"],  # ka
+    "BENGALI": ["\u0995"],  # ka
+    "GUJARATI": ["\u0a95"],  # ka
+    "GURMUKHI": ["\u0a15"],  # ka
+    "ORIYA": ["\u0b15"],  # ka
+    "TAMIL": ["\u0b95"],  # ka
+    "TELUGU": ["\u0c15"],  # ka
+    "KANNADA": ["\u0c95"],  # ka
+    "MALAYALAM": ["\u0d15"],  # ka
+    "SINHALA": ["\u0d9a"],  # alpapraana kayanna
+    "THAI": ["\u0e01"],  # ko kai
+    "LAO": ["\u0e81"],  # ko
+    "MYANMAR": ["\u1000"],  # ka
+    "KHMER": ["\u1780"],  # ka
+    "TIBETAN": ["\u0f40"],  # ka
+    "JAVANESE": ["\ua98f"],  # ka
+    "SUNDANESE": ["\u1b8a"],  # ka
+    "CYRILLIC": ["\u0430"],  # a
+    "GREEK": ["\u03b1"],  # alpha
+}
+
+
 def _make_token(
     char: str,
     script_words: dict[str, list[str]],
@@ -207,7 +249,13 @@ def _make_token(
         digits = "".join(rng.choice("0123456789") for _ in range(rng.randint(0, 3)))
         return char + digits
 
-    base_letters = script_base_letters.get(script, [])
+    base_letters = [
+        c
+        for c in (script_base_letters.get(script, []) or _CARRIER.get(script, []))
+        if c not in _PREBASE_VOWELS  # never use a left-reordering vowel as filler
+    ]
+    if not base_letters:
+        base_letters = _CARRIER.get(script, [])
     bases = script_words.get(script, [])
 
     if _is_mark(char):
@@ -252,6 +300,22 @@ def _make_token(
         return ""  # no base letter available for this script -> cannot place validly
 
     # Non-mark character (letter or standalone modifier).
+    if _is_prebase_vowel(char):
+        # A Thai/Lao left-reordering vowel needs a consonant after it. Prefer
+        # inserting it directly before a letter of a real word; else scaffold
+        # vowel + consonant(s).
+        for _ in range(6):
+            if not bases:
+                break
+            word = rng.choice(bases)
+            positions = [i for i, c in enumerate(word) if unicodedata.category(c).startswith("L")]
+            if positions:
+                i = rng.choice(positions)
+                return (word[:i] + char + word[i:])[:16]
+        if base_letters:
+            tail = "".join(rng.choice(base_letters) for _ in range(rng.randint(1, 2)))
+            return (char + tail)[:16]
+        return ""
     if bases and rng.random() < 0.6:
         word = rng.choice(bases)
         pos = rng.randint(0, len(word))

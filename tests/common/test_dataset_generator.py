@@ -174,3 +174,24 @@ def test_recognition_pools_resolve_backgrounds(monkeypatch):
     cfg = GenerationConfig.flat(task="recognition", output_dir="ds", num_images=10)
     SyntheticDatasetGenerator(cfg).build_recognition_pools()
     assert resolved["called"]
+
+
+def test_recognition_pool_synthesised_when_corpus_empty(monkeypatch):
+    # A vocab with no usable corpus (no frequency list, or no in-vocab words)
+    # must still build a pool from synthesised coverage tokens, not raise.
+    import generator.dataset_generator as dg
+    from generator.components.vocab_coverage import resolve_vocab_charset
+
+    monkeypatch.setattr(dg.CorpusDownloader, "fetch", lambda self, lang: [])  # simulate no corpus
+    cfg = GenerationConfig.flat(
+        task="recognition",
+        output_dir="ds",
+        num_images=40,
+        languages=["or"],
+        target_vocab=["odia"],
+        auto_download_backgrounds=False,
+    )
+    train, val = SyntheticDatasetGenerator(cfg)._prepare_train_val()
+    assert train and val  # synthesised, non-empty
+    charset = resolve_vocab_charset(["odia"])
+    assert all(set(w) <= charset for w in train)  # every label within the vocab

@@ -80,3 +80,52 @@ def test_generate_numeric_tokens():
 
 def test_required_scripts_static():
     assert CorpusDownloader  # smoke - imported
+
+
+def test_fetch_falls_back_to_secondary_source(monkeypatch, tmp_path):
+    # hermitdave (primary) misses Odia; frekwencja (secondary) provides it. The
+    # leading language-code header line must be stripped.
+    from generator.components.corpus_downloader import CorpusDownloader
+
+    cd = CorpusDownloader(cache_dir=str(tmp_path))
+
+    def fake_fetch(url):
+        if "frekwencja" in url and url.endswith("/or.txt"):
+            return "or\n\u0b30\u0b39\u0b3f\u0b2c\u0b3e\n\u0b0f\u0b2c\u0b02\n".encode()
+        return None  # primary (and everything else) misses
+
+    monkeypatch.setattr(cd, "_fetch_url", fake_fetch)
+    words = cd.fetch("or")
+    assert "\u0b30\u0b39\u0b3f\u0b2c\u0b3e" in words  # real Odia word kept
+    assert "or" not in words  # header line dropped
+
+
+def test_primary_source_is_preferred_over_secondary(monkeypatch, tmp_path):
+    from generator.components.corpus_downloader import CorpusDownloader
+
+    cd = CorpusDownloader(cache_dir=str(tmp_path))
+
+    def fake_fetch(url):
+        if "hermitdave" in url:
+            return b"hello 100\nworld 90\n"
+        return b"secondary 1\n"  # would be used only if primary missed
+
+    monkeypatch.setattr(cd, "_fetch_url", fake_fetch)
+    words = cd.fetch("en")
+    assert "hello" in words and "secondary" not in words
+
+
+def test_script_filter_drops_foreign_strays(monkeypatch, tmp_path):
+    # The secondary lists mix in some Latin words; the per-language script filter
+    # must drop them (this also cleans Latin contamination in primary lists).
+    from generator.components.corpus_downloader import CorpusDownloader
+
+    cd = CorpusDownloader(cache_dir=str(tmp_path), filter_by_script=True)
+    monkeypatch.setattr(
+        cd,
+        "_fetch_url",
+        lambda url: "the\nyou\n\u0b30\u0b39\u0b3f\u0b2c\u0b3e\n".encode() if "frekwencja" in url else None,
+    )
+    words = cd.fetch("or")
+    assert "the" not in words and "you" not in words  # latin strays removed
+    assert "\u0b30\u0b39\u0b3f\u0b2c\u0b3e" in words  # odia kept

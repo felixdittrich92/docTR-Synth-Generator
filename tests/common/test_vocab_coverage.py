@@ -145,3 +145,88 @@ def test_synthesized_virama_is_never_dangling():
                 assert unicodedata.category(token[i + 1]).startswith("L"), (
                     f"virama not followed by a letter in {token!r}"
                 )
+
+
+def test_all_vocabs_keys_synthesize_valid_clusters():
+    # Sweep EVERY VOCABS key (worst case: empty corpus -> pure synthesis) and
+    # assert each synthesised coverage token is a structurally valid cluster:
+    # no leading combining mark, no dangling virama, every mark on a same-script
+    # base letter, and full coverage of letters/marks (CJK/Hangul excepted).
+    import unicodedata
+    from collections import defaultdict
+
+    from generator.components.vocab_coverage import (
+        _LARGE_SCRIPT_THRESHOLD,
+        _script_of,
+        augment_words_for_coverage,
+        resolve_vocab_charset,
+    )
+    from generator.components.vocabs import VOCABS
+
+    def is_mark(ch):
+        return unicodedata.category(ch).startswith("M")
+
+    for key in VOCABS:
+        charset = set(resolve_vocab_charset([key]))
+        by_script = defaultdict(int)
+        for c in charset:
+            s = _script_of(c)
+            if s != "COMMON":
+                by_script[s] += 1
+        oversized = {s for s, n in by_script.items() if n > _LARGE_SCRIPT_THRESHOLD}
+        aug, _, _ = augment_words_for_coverage([], charset, min_count=2, seed=7)
+        covered = set()
+        for tok in aug:
+            assert tok, f"{key}: empty token emitted"
+            covered.update(tok)
+            assert not is_mark(tok[0]), f"{key}: token starts with a combining mark: {tok!r}"
+            for i, ch in enumerate(tok):
+                if unicodedata.combining(ch) == 9:
+                    assert i + 1 < len(tok) and unicodedata.category(tok[i + 1]).startswith("L"), (
+                        f"{key}: dangling virama in {tok!r}"
+                    )
+                if is_mark(ch):
+                    j = i - 1
+                    while j >= 0 and is_mark(tok[j]):
+                        j -= 1
+                    assert (
+                        j >= 0
+                        and unicodedata.category(tok[j]).startswith("L")
+                        and (_script_of(tok[j]) == _script_of(ch))
+                    ), f"{key}: mark not on a same-script base letter in {tok!r}"
+        gaps = [
+            c
+            for c in charset
+            if c not in covered
+            and unicodedata.category(c)[0] in "LM"
+            and _script_of(c) not in oversized
+            and _script_of(c) != "?"
+        ]
+        assert not gaps, f"{key}: uncovered letters/marks {[hex(ord(c)) for c in gaps]}"
+
+
+def test_all_vocabs_synthesis_is_structurally_valid():
+    # Every VOCABS key must synthesise coverage tokens that respect the script's
+    # diacritic/vowel/matra/virama rules: no token may start with a combining
+    # mark, a virama must sit between two letters, and a Thai/Lao pre-base vowel
+    # must be followed by a consonant. Forcing an empty corpus exercises the
+    # pure-synthesis path for every script at once.
+    import unicodedata
+
+    from generator.components.vocab_coverage import _PREBASE_VOWELS
+    from generator.components.vocabs import VOCABS
+
+    def _is_letter(c: str) -> bool:
+        return unicodedata.category(c).startswith("L")
+
+    for key, chars in VOCABS.items():
+        augmented, _, _ = augment_words_for_coverage([], chars, min_count=2, seed=7)
+        viramas = {c for c in chars if unicodedata.combining(c) == 9}
+        for token in augmented:
+            assert not unicodedata.category(token[0]).startswith("M"), (key, token)
+            for i, c in enumerate(token):
+                follows_letter = i + 1 < len(token) and _is_letter(token[i + 1])
+                if c in viramas:
+                    assert follows_letter, f"dangling virama in {key}: {token!r}"
+                if c in _PREBASE_VOWELS:
+                    assert follows_letter, f"orphaned pre-base vowel in {key}: {token!r}"

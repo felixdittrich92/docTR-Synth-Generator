@@ -100,65 +100,80 @@ class SyntheticDatasetGenerator:
                 train, val = self._inject_coverage(train, val, target)
             return filter_in_vocab(train, charset), filter_in_vocab(val, charset)
 
-        languages = cfg.core.languages or ["en"]
-        cache_dir = cfg.resources.corpus_cache_dir or ".corpus_cache"
-        print(f"No wordlist given - downloading real words for languages: {languages}")
-        downloader = CorpusDownloader(
-            cache_dir=cache_dir,
-            timeout=cfg.resources.font_download_timeout,
-            min_word_length=cfg.corpus.min_word_length,
-            max_word_length=cfg.corpus.max_word_length,
-            filter_by_script=cfg.corpus.filter_by_script,
-        )
+        languages = list(cfg.core.languages or [])
+        target = self._coverage_target(languages)
+        # With neither explicit languages nor a vocab to synthesise from, fall
+        # back to English so a bare zero-config run still works.
+        if not languages and not target:
+            languages = ["en"]
+            target = self._coverage_target(languages)
 
-        # Per-language pools (casing variants folded in per language so they are
-        # balanced alongside their own language rather than globally).
         language_pools: dict[str, list[str]] = {}
-        for lang in languages:
-            pool = downloader.fetch(lang)[: cfg.corpus.words_per_language]
-            if not pool:
-                print(f"  warning: no words downloaded for '{lang}', skipping it.")
-                continue
-            if cfg.corpus.casing_variant_prob > 0:
-                pool = apply_casing_variants(pool, prob=cfg.corpus.casing_variant_prob, seed=cfg.corpus.seed)
-            if charset:
-                pool = filter_in_vocab(pool, charset)
+        if languages:
+            cache_dir = cfg.resources.corpus_cache_dir or ".corpus_cache"
+            print(f"No wordlist given - downloading real words for languages: {languages}")
+            downloader = CorpusDownloader(
+                cache_dir=cache_dir,
+                timeout=cfg.resources.font_download_timeout,
+                min_word_length=cfg.corpus.min_word_length,
+                max_word_length=cfg.corpus.max_word_length,
+                filter_by_script=cfg.corpus.filter_by_script,
+            )
+            # Per-language pools (casing variants folded in per language so they
+            # are balanced alongside their own language rather than globally).
+            for lang in languages:
+                pool = downloader.fetch(lang)[: cfg.corpus.words_per_language]
                 if not pool:
-                    print(f"  warning: no words for '{lang}' remain within the target vocab, skipping it.")
+                    print(f"  note: no frequency list for '{lang}' - its characters will be synthesised.")
                     continue
-            language_pools[lang] = pool
+                if cfg.corpus.casing_variant_prob > 0:
+                    pool = apply_casing_variants(pool, prob=cfg.corpus.casing_variant_prob, seed=cfg.corpus.seed)
+                if charset:
+                    pool = filter_in_vocab(pool, charset)
+                    if not pool:
+                        print(f"  note: no '{lang}' words fall within the vocab - its characters will be synthesised.")
+                        continue
+                language_pools[lang] = pool
 
-        if not language_pools:
+        if language_pools:
+            numeric_tokens = None
+            if cfg.corpus.numeric_token_ratio > 0:
+                n_pool = max(256, int(cfg.core.num_images * cfg.corpus.numeric_token_ratio) * 2)
+                numeric_tokens = generate_numeric_tokens(n_pool, seed=cfg.corpus.seed)
+                if charset:
+                    numeric_tokens = filter_in_vocab(numeric_tokens, charset) or None
+
+            balancer = DatasetBalancer(seed=cfg.corpus.seed)
+            result = balancer.allocate_and_split(
+                language_pools=language_pools,
+                num_images=cfg.core.num_images,
+                val_percent=cfg.core.val_percent,
+                strategy=cfg.balance.language_balance,
+                weights=cfg.balance.language_weights,
+                numeric_tokens=numeric_tokens,
+                numeric_ratio=cfg.corpus.numeric_token_ratio,
+                min_char_coverage=cfg.balance.min_char_coverage,
+                report=cfg.balance.print_balance_report,
+            )
+            train, val = result.train, result.val
+        elif target:
+            # No usable corpus (no frequency list for these languages, or nothing
+            # within the target vocab). Rather than fail, build the whole pool
+            # from synthesised coverage tokens so vocabs like Odia/Khmer - and
+            # combined vocabs - still train.
+            print("  no in-vocab corpus words available - synthesising the pool from the target vocab.")
+            train, val = [], []
+        else:
             raise ValueError(
-                f"Could not download any words for languages {languages}. "
-                "Check connectivity or provide a wordlist_path."
+                f"Could not build a word pool for languages {languages} and there is "
+                "no target vocab to synthesise from. Provide a wordlist_path, languages "
+                "that have a frequency list, or a vocab."
             )
 
-        numeric_tokens = None
-        if cfg.corpus.numeric_token_ratio > 0:
-            n_pool = max(256, int(cfg.core.num_images * cfg.corpus.numeric_token_ratio) * 2)
-            numeric_tokens = generate_numeric_tokens(n_pool, seed=cfg.corpus.seed)
-            if charset:
-                numeric_tokens = filter_in_vocab(numeric_tokens, charset) or None
-
-        balancer = DatasetBalancer(seed=cfg.corpus.seed)
-        result = balancer.allocate_and_split(
-            language_pools=language_pools,
-            num_images=cfg.core.num_images,
-            val_percent=cfg.core.val_percent,
-            strategy=cfg.balance.language_balance,
-            weights=cfg.balance.language_weights,
-            numeric_tokens=numeric_tokens,
-            numeric_ratio=cfg.corpus.numeric_token_ratio,
-            min_char_coverage=cfg.balance.min_char_coverage,
-            report=cfg.balance.print_balance_report,
-        )
-        train, val = result.train, result.val
         # Hard per-split coverage guarantee: append synthesised tokens so train
         # and val each contain every renderable vocab character. Done after the
         # split (not via the balancer's stratified top-up) so a rare character
         # can never end up in only one split.
-        target = self._coverage_target(languages)
         if target:
             train, val = self._inject_coverage(train, val, target)
         return filter_in_vocab(train, charset), filter_in_vocab(val, charset)

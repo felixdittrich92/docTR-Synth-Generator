@@ -11,6 +11,7 @@ import pytest
 from generator.components.config import GenerationConfig
 from generator.components.generator import TextImageGenerator
 from generator.components.page_generator import PageGenerator
+from generator.components.vocabs import VOCABS
 from generator.doctr_dataset import (
     CLASS_NAME,
     Sample,
@@ -179,3 +180,77 @@ def test_recognition_dataset_empty_after_vocab_filter_raises(tiny_font_dir):
         SyntheticRecognitionDataset(
             ["日本語", "привет"], _cfg(tiny_font_dir, "recognition"), num_samples=4, vocab="english"
         )
+
+
+def test_build_recognition_datasets_sizes_from_config(monkeypatch):
+    import generator.dataset_generator as dg
+    from generator.components import GenerationConfig
+    from generator.doctr_dataset import build_recognition_datasets
+
+    captured = {}
+
+    def fake_pools(self):
+        captured["languages"] = list(self.config.core.languages)
+        return (["alpha", "beta", "gamma", "delta"], ["one", "two"])
+
+    monkeypatch.setattr(dg.SyntheticDatasetGenerator, "build_recognition_pools", fake_pools)
+    cfg = GenerationConfig.flat(task="recognition", num_images=100, val_percent=0.2)
+    train, val = build_recognition_datasets(cfg, vocab=["german", "urdu"])
+    assert len(train) == 80 and len(val) == 20  # derived from num_images + val_percent
+    # vocab-derived languages combine every word list that fits the vocab, so the
+    # two named languages are present (plus others fully encodable in it).
+    assert {"de", "ur"} <= set(captured["languages"])
+
+
+def test_build_detection_datasets_sizes_and_language_names(monkeypatch):
+    import generator.dataset_generator as dg
+    from generator.components import GenerationConfig
+    from generator.doctr_dataset import build_detection_datasets
+
+    captured = {}
+
+    def fake_pool(self):
+        captured["languages"] = list(self.config.core.languages)
+        return ["alpha", "beta", "gamma"]
+
+    monkeypatch.setattr(dg.SyntheticDatasetGenerator, "build_detection_pool", fake_pool)
+    cfg = GenerationConfig.flat(task="detection", num_images=50, val_percent=0.1)
+    train, val = build_detection_datasets(cfg, languages=["german", "english", "malay"], use_polygons=True)
+    assert len(train) == 45 and len(val) == 5  # derived from num_images + val_percent
+    assert captured["languages"] == ["de", "en", "ms"]  # incl. malay -> ms
+    assert train.use_polygons is True
+
+
+def test_corpus_languages_for_vocab_combines_and_handles_scriptless():
+    from generator.doctr_dataset import _corpus_languages_for_vocab
+
+    multi = _corpus_languages_for_vocab("multilingual")
+    assert "de" in multi and "ru" in multi and len(multi) > 10  # combines many word lists
+    assert _corpus_languages_for_vocab("khmer") == []  # nothing fits -> synthesise downstream
+    assert _corpus_languages_for_vocab("odia") == ["or"]
+    german = _corpus_languages_for_vocab("german")
+    assert "de" in german and "en" in german  # english fits within the german vocab
+
+
+def test_latex_formulas_are_valid_and_in_vocab():
+    from generator.components.latex_generator import generate_latex_formulas, is_valid_latex
+
+    formulas = generate_latex_formulas(40, seed=1)
+    assert len(formulas) >= 30  # most attempts yield distinct valid formulas
+    vocab = set(VOCABS["latex"])
+    for f in formulas:
+        assert is_valid_latex(f)  # mathtext can render it
+        assert set(f) <= vocab  # label stays within VOCABS["latex"]
+
+
+def test_build_latex_recognition_datasets(monkeypatch):
+    from generator.components import GenerationConfig
+    from generator.components.vocabs import VOCABS
+    from generator.doctr_dataset import build_recognition_datasets
+
+    cfg = GenerationConfig.flat(task="recognition", num_images=20, val_percent=0.25, corpus_seed=5)
+    train, val = build_recognition_datasets(cfg, vocab="latex")  # routed to the latex builder
+    assert len(train) == 15 and len(val) == 5  # sizes from num_images + val_percent
+    assert set(train.formulas).isdisjoint(val.formulas)  # disjoint train/val formulas
+    img, label = train[0]
+    assert img.shape[0] == 3 and set(label) <= set(VOCABS["latex"])

@@ -16,8 +16,10 @@ from PIL import Image
 
 from .components.config import GenerationConfig
 from .components.generator import TextImageGenerator
+from .components.latex_generator import generate_latex_formulas, render_latex_image
 from .components.page_generator import PageGenerator
-from .components.vocab_coverage import VOCAB_TO_LANGUAGE, resolve_vocab_charset
+from .components.vocab_coverage import LANGUAGE_TO_VOCAB, VOCAB_TO_LANGUAGE, resolve_vocab_charset
+from .components.vocabs import VOCABS
 from .dataset_generator import SyntheticDatasetGenerator
 
 try:  # docTR's single-class name ("words"); fall back to the same literal if absent.
@@ -264,6 +266,46 @@ class SyntheticRecognitionDataset(_BaseSynthDataset):
         return render_recognition_sample(self._generator, self.pool, max_attempts=self.max_attempts)
 
 
+class SyntheticLatexDataset(_BaseSynthDataset):
+    """On-the-fly LaTeX formula recognition dataset.
+
+    Each sample is a rendered math formula (Matplotlib mathtext - no system TeX)
+    whose label is the LaTeX *source* string. Train against ``VOCABS["latex"]``.
+
+    Args:
+        formulas: validated LaTeX source strings to sample from.
+        num_samples: virtual epoch length (``len(dataset)``).
+        fontsize_range: random font size per sample.
+        img_transforms / sample_transforms: docTR transforms, as elsewhere.
+        seed: ``None`` -> fresh every access (train); int -> reproducible (val).
+    """
+
+    def __init__(
+        self,
+        formulas: list[str],
+        num_samples: int,
+        *,
+        fontsize_range: tuple[int, int] = (16, 30),
+        img_transforms: Callable | None = None,
+        sample_transforms: Callable | None = None,
+        seed: int | None = None,
+    ) -> None:
+        super().__init__(num_samples, img_transforms=img_transforms, sample_transforms=sample_transforms, seed=seed)
+        if not formulas:
+            raise ValueError("latex formula pool is empty")
+        self.formulas = list(formulas)
+        self.fontsize_range = fontsize_range
+        self.charset = set(VOCABS["latex"])
+
+    def _render(self, index: int) -> tuple[Image.Image, str]:
+        formula = random.choice(self.formulas)
+        fontsize = random.randint(*self.fontsize_range)
+        rgba = render_latex_image(formula, fontsize=fontsize)
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, (0, 0), rgba.getchannel("A"))
+        return background, formula
+
+
 class SyntheticDetectionDataset(_BaseSynthDataset):
     """On-the-fly detection dataset (full synthetic pages) for docTR.
 
@@ -328,6 +370,27 @@ def _to_corpus_languages(languages: list[str]) -> list[str]:
     return [VOCAB_TO_LANGUAGE.get(lang, lang) for lang in languages]
 
 
+def _corpus_languages_for_vocab(vocab: str | list[str]) -> list[str]:
+    """Every corpus language whose characters fit entirely within ``vocab``.
+
+    This combines as many real word lists as possible: a broad vocab like
+    ``"multilingual"`` pulls in every language fully encodable in it, while a
+    script-specific vocab like ``"khmer"`` or ``"odia"`` yields only its own
+    language(s) - or none, in which case the pool is synthesised downstream.
+    """
+    charset = resolve_vocab_charset(vocab)
+    if not charset:
+        return []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for iso, vkey in LANGUAGE_TO_VOCAB.items():
+        sub = VOCABS.get(vkey)
+        if sub and set(sub) <= charset and iso not in seen:
+            seen.add(iso)
+            ordered.append(iso)
+    return ordered
+
+
 def _split_sizes(config: GenerationConfig, train_samples: int | None, val_samples: int | None) -> tuple[int, int]:
     """Per-epoch ``(train, val)`` sizes derived from ``num_images`` and ``val_percent``.
 
@@ -349,7 +412,10 @@ def build_recognition_datasets(
     train_samples: int | None = None,
     val_samples: int | None = None,
     val_seed: int = 1234,
-) -> tuple[SyntheticRecognitionDataset, SyntheticRecognitionDataset]:
+) -> (
+    tuple[SyntheticRecognitionDataset, SyntheticRecognitionDataset]
+    | tuple[SyntheticLatexDataset, SyntheticLatexDataset]
+):
     """Build ``(train, val)`` on-the-fly recognition datasets from a config.
 
     Sizes come straight from the config: ``num_images`` total, split into
@@ -365,17 +431,27 @@ def build_recognition_datasets(
     the matching ``--vocab`` never hits an un-encodable label.
 
     Corpus languages come from ``languages`` (ISO codes or VOCABS keys) when
-    given, else the language(s) the ``vocab`` keys map to, else
-    ``config.core.languages``. Combined vocabs such as ``"multilingual"`` have no
-    single language, so pass ``languages=[...]`` for real multilingual words
-    rather than mostly-synthesised coverage.
+    given. Otherwise they are derived from ``vocab``: every word list whose
+    characters fit within the vocab is combined (so ``"multilingual"`` blends
+    many real languages), and any character with no corpus word - or a vocab
+    with no matching corpus at all, like ``"khmer"`` or ``"odia"`` - is covered
+    by synthesised tokens instead of failing.
     """
+    # LaTeX is rendered math, not font-drawn words - route to its own builder.
+    if vocab is not None and (vocab == "latex" or vocab == ["latex"]):
+        return build_latex_recognition_datasets(
+            config,
+            img_transforms=img_transforms,
+            sample_transforms=sample_transforms,
+            train_samples=train_samples,
+            val_samples=val_samples,
+            val_seed=val_seed,
+        )
     if languages is not None:
         langs = _to_corpus_languages(languages)
     elif vocab is not None:
-        keys = [vocab] if isinstance(vocab, str) else list(vocab)
-        derived = [VOCAB_TO_LANGUAGE[k] for k in keys if k in VOCAB_TO_LANGUAGE]
-        langs = derived or list(config.core.languages or ["en"])
+        # Combine every word list that fits the vocab; empty -> synthesise the pool.
+        langs = _corpus_languages_for_vocab(vocab)
     else:
         langs = list(config.core.languages or ["en"])
 
@@ -400,6 +476,49 @@ def build_recognition_datasets(
         config,
         val_n,
         vocab=vocab,
+        img_transforms=img_transforms,
+        sample_transforms=sample_transforms,
+        seed=val_seed,
+    )
+    return train_set, val_set
+
+
+def build_latex_recognition_datasets(
+    config: GenerationConfig,
+    *,
+    img_transforms: Callable | None = None,
+    sample_transforms: Callable | None = None,
+    train_samples: int | None = None,
+    val_samples: int | None = None,
+    val_seed: int = 1234,
+    max_depth: int = 3,
+    pool_size: int = 3000,
+) -> tuple[SyntheticLatexDataset, SyntheticLatexDataset]:
+    """Build ``(train, val)`` LaTeX-formula recognition datasets.
+
+    Labels are valid LaTeX source strings; images are the rendered math. Sizes
+    come from the config (``num_images`` split by ``val_percent``), exactly like
+    :func:`build_recognition_datasets`. Train against ``VOCABS["latex"]``.
+    A disjoint pool of ``pool_size`` formulas is generated once and split so the
+    train and val formulas never overlap.
+    """
+    train_n, val_n = _split_sizes(config, train_samples, val_samples)
+    formulas = generate_latex_formulas(pool_size, seed=config.corpus.seed, max_depth=max_depth)
+    if not formulas:
+        raise ValueError("could not generate any valid LaTeX formulas")
+    cut = max(1, int(len(formulas) * (1 - config.core.val_percent)))
+    train_pool = formulas[:cut]
+    val_pool = formulas[cut:] or formulas[:1]
+    train_set = SyntheticLatexDataset(
+        train_pool,
+        train_n,
+        img_transforms=img_transforms,
+        sample_transforms=sample_transforms,
+        seed=None,
+    )
+    val_set = SyntheticLatexDataset(
+        val_pool,
+        val_n,
         img_transforms=img_transforms,
         sample_transforms=sample_transforms,
         seed=val_seed,

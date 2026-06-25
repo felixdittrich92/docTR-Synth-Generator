@@ -2,7 +2,7 @@
 ![Build Status](https://github.com/felixdittrich92/docTR-Synth-Generator/workflows/builds/badge.svg)
 [![codecov](https://codecov.io/gh/felixdittrich92/docTR-Synth-Generator/graph/badge.svg?token=31MDR20JGI)](https://codecov.io/gh/felixdittrich92/docTR-Synth-Generator)
 [![CodeFactor](https://www.codefactor.io/repository/github/felixdittrich92/doctr-synth-generator/badge)](https://www.codefactor.io/repository/github/felixdittrich92/doctr-synth-generator)
-[![Pypi](https://img.shields.io/badge/pypi-v0.3.1a0-blue.svg)](https://pypi.org/project/docTR-Synth-Generator/)
+[![Pypi](https://img.shields.io/badge/pypi-v0.4.0a0-blue.svg)](https://pypi.org/project/docTR-Synth-Generator/)
 
 # docTR-Synth-Generator
 A tool to generate synthetic OCR datasets - made for docTR
@@ -113,11 +113,15 @@ cached (later runs are offline). Providing your own `font_dir` / `wordlist_path`
   open-source [Noto](https://fonts.google.com/noto) font is downloaded, verified
   and cached, so words are never silently skipped (the usual cause of biased,
   latin-only datasets). Disable with `auto_download_fonts=False`.
-- **Words** - with no `wordlist_path`, real frequency-ranked words come from
-  [FrequencyWords](https://github.com/hermitdave/FrequencyWords) (~85 languages)
-  and are cleaned (script filter, length bounds, punctuation removal). Two realism
-  helpers are on by default: `casing_variant_prob` (0.3) adds Title/UPPERCASE
-  variants, and `numeric_token_ratio` (0.05) mixes in numbers, dates and prices.
+- **Words** - with no `wordlist_path`, real frequency-ranked words are downloaded
+  and cleaned (script filter, length bounds, punctuation removal). They come from
+  [FrequencyWords](https://github.com/hermitdave/FrequencyWords) first, falling
+  back to [most-common-words-multilingual](https://github.com/frekwencja/most-common-words-multilingual)
+  for the many languages it lacks (Odia, Khmer, Burmese and most Indic/SE-Asian
+  scripts), so far fewer languages need synthesised words. Any character still
+  missing from the corpus is then synthesised. Two realism helpers are on by
+  default: `casing_variant_prob` (0.3) adds Title/UPPERCASE variants, and
+  `numeric_token_ratio` (0.05) mixes in numbers, dates and prices.
 - **Backgrounds** - with no `bg_image_dir`, a curated background set is downloaded
   instead of blank pages. Disable with `auto_download_backgrounds=False`, or pass
   a `background_manifest_url` for your own collection.

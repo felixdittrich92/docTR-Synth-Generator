@@ -8,7 +8,6 @@ from __future__ import annotations
 import os
 import random
 import time
-import warnings
 from dataclasses import replace
 from typing import Any, Callable
 
@@ -321,58 +320,76 @@ class SyntheticDetectionDataset(_BaseSynthDataset):
 # --------------------------------------------------------------------------- #
 # Convenience factories: build matched (train, val) datasets in one call.
 # --------------------------------------------------------------------------- #
+def _to_corpus_languages(languages: list[str]) -> list[str]:
+    """Map human-readable VOCABS keys (``"german"``) to corpus ISO codes (``"de"``).
+
+    Anything already an ISO code (or unknown) is passed through unchanged.
+    """
+    return [VOCAB_TO_LANGUAGE.get(lang, lang) for lang in languages]
+
+
+def _split_sizes(config: GenerationConfig, train_samples: int | None, val_samples: int | None) -> tuple[int, int]:
+    """Per-epoch ``(train, val)`` sizes derived from ``num_images`` and ``val_percent``.
+
+    Explicit ``train_samples`` / ``val_samples`` override the derived values.
+    """
+    total = max(1, int(config.core.num_images))
+    val = val_samples if val_samples is not None else max(1, round(total * config.core.val_percent))
+    train = train_samples if train_samples is not None else max(1, total - round(total * config.core.val_percent))
+    return int(train), int(val)
+
+
 def build_recognition_datasets(
     config: GenerationConfig,
     *,
-    train_samples: int,
-    val_samples: int,
     vocab: str | list[str] | None = None,
+    languages: list[str] | None = None,
     img_transforms: Callable | None = None,
     sample_transforms: Callable | None = None,
+    train_samples: int | None = None,
+    val_samples: int | None = None,
     val_seed: int = 1234,
 ) -> tuple[SyntheticRecognitionDataset, SyntheticRecognitionDataset]:
-    """Build ``(train, val)`` on-the-fly recognition datasets sharing one pipeline.
+    """Build ``(train, val)`` on-the-fly recognition datasets from a config.
 
-    The recognition pools (with vocab coverage) are built once. The train set
-    draws fresh crops every access; the val set is a reproducible virtual set.
-    ``config.core.num_images`` sets the *pool* size (variety); ``train_samples`` /
-    ``val_samples`` set the per-epoch iteration counts.
+    Sizes come straight from the config: ``num_images`` total, split into
+    ``len(train)`` / ``len(val)`` by ``val_percent`` (override with the optional
+    ``train_samples`` / ``val_samples``). The train set draws fresh crops every
+    access; the val set is reproducible. Words, fonts and (any) backgrounds are
+    downloaded/cached once in the parent process.
 
     Pass ``vocab`` to pin the docTR vocab to train against - a ``VOCABS`` key, a
-    literal charset, or a list such as ``["german", "urdu", "odia"]`` (their
-    union). Every generated label is then guaranteed to fall within that
-    character set, so a docTR recognition model trained on the matching
-    ``--vocab`` never hits a label it cannot encode. When ``config.core.languages`` is
-    empty the corpus languages are derived from the vocab keys (``german`` ->
-    ``de``); keys with no corpus mapping are still covered via synthesis.
+    literal charset, or a list such as ``["german", "urdu"]`` (their union).
+    Every label is restricted to that character set, and characters missing from
+    the corpus are synthesised so coverage stays balanced - a model trained on
+    the matching ``--vocab`` never hits an un-encodable label.
+
+    Corpus languages come from ``languages`` (ISO codes or VOCABS keys) when
+    given, else the language(s) the ``vocab`` keys map to, else
+    ``config.core.languages``. Combined vocabs such as ``"multilingual"`` have no
+    single language, so pass ``languages=[...]`` for real multilingual words
+    rather than mostly-synthesised coverage.
     """
-    if vocab is not None:
+    if languages is not None:
+        langs = _to_corpus_languages(languages)
+    elif vocab is not None:
         keys = [vocab] if isinstance(vocab, str) else list(vocab)
         derived = [VOCAB_TO_LANGUAGE[k] for k in keys if k in VOCAB_TO_LANGUAGE]
-        unmapped = [k for k in keys if k not in VOCAB_TO_LANGUAGE]
-        # Use the vocab-derived corpus languages unless the user picked their own
-        # (i.e. set config.core.languages to something other than the "en" default).
-        user_chose = bool(config.core.languages) and list(config.core.languages) != ["en"]  # type: ignore[arg-type]
-        languages = list(config.core.languages) if user_chose else (derived or config.core.languages)  # type: ignore[arg-type]
-        if unmapped and not user_chose:
-            warnings.warn(
-                f"No corpus language mapping for vocab key(s) {unmapped}; their characters "
-                "will still be covered via synthesis, but pass an explicit `languages=[...]` "
-                "on the config to also pull real words for them.",
-                stacklevel=2,
-            )
-        config = replace(
-            config,
-            core=replace(config.core, languages=languages),
-            coverage=replace(config.coverage, target_vocab=vocab, restrict_to_vocab=True),
-        )
+        langs = derived or list(config.core.languages or ["en"])
+    else:
+        langs = list(config.core.languages or ["en"])
 
+    config = replace(config, core=replace(config.core, languages=langs))
+    if vocab is not None:
+        config = replace(config, coverage=replace(config.coverage, target_vocab=vocab, restrict_to_vocab=True))
+
+    train_n, val_n = _split_sizes(config, train_samples, val_samples)
     pipeline = SyntheticDatasetGenerator(config)
     train_pool, val_pool = pipeline.build_recognition_pools()
     train_set = SyntheticRecognitionDataset(
         train_pool,
         config,
-        train_samples,
+        train_n,
         vocab=vocab,
         img_transforms=img_transforms,
         sample_transforms=sample_transforms,
@@ -381,7 +398,7 @@ def build_recognition_datasets(
     val_set = SyntheticRecognitionDataset(
         val_pool,
         config,
-        val_samples,
+        val_n,
         vocab=vocab,
         img_transforms=img_transforms,
         sample_transforms=sample_transforms,
@@ -393,24 +410,36 @@ def build_recognition_datasets(
 def build_detection_datasets(
     config: GenerationConfig,
     *,
-    train_samples: int,
-    val_samples: int,
+    languages: list[str] | None = None,
     use_polygons: bool = False,
     img_transforms: Callable | None = None,
     sample_transforms: Callable | None = None,
+    train_samples: int | None = None,
+    val_samples: int | None = None,
     val_seed: int = 1234,
 ) -> tuple[SyntheticDetectionDataset, SyntheticDetectionDataset]:
-    """Build ``(train, val)`` on-the-fly detection datasets sharing one pipeline.
+    """Build ``(train, val)`` on-the-fly detection datasets from a config.
 
-    Backgrounds and the word pool are resolved once in the parent process; the
-    train set draws fresh pages every access while the val set is reproducible.
+    Like :func:`build_recognition_datasets`, sizes come from the config
+    (``num_images`` total, split by ``val_percent``; override with
+    ``train_samples`` / ``val_samples``). Backgrounds, words and fonts are
+    downloaded/cached once in the parent process, so auto-download just works.
+
+    ``languages`` accepts ISO codes or VOCABS keys (e.g. ``"german"``,
+    ``"english"``, ``"malay"``); when omitted ``config.core.languages`` is used.
+    Set ``use_polygons=True`` to keep rotated quads (matches the training
+    script's ``--rotation`` flag); otherwise axis-aligned boxes are returned.
     """
+    if languages is not None:
+        config = replace(config, core=replace(config.core, languages=_to_corpus_languages(languages)))
+
+    train_n, val_n = _split_sizes(config, train_samples, val_samples)
     pipeline = SyntheticDatasetGenerator(config)
-    pool = pipeline.build_detection_pool()
+    pool = pipeline.build_detection_pool()  # resolves backgrounds + builds the word pool
     train_set = SyntheticDetectionDataset(
         pool,
         config,
-        train_samples,
+        train_n,
         use_polygons=use_polygons,
         img_transforms=img_transforms,
         sample_transforms=sample_transforms,
@@ -419,7 +448,7 @@ def build_detection_datasets(
     val_set = SyntheticDetectionDataset(
         pool,
         config,
-        val_samples,
+        val_n,
         use_polygons=use_polygons,
         img_transforms=img_transforms,
         sample_transforms=sample_transforms,

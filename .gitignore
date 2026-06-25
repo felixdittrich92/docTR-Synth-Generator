@@ -148,6 +148,7 @@ wandb/
 # Output folder
 /output_dataset
 /detection_dataset
+/recognition_dataset
 .corpus_cache
 .font_cache
 .background_cache

@@ -159,3 +159,18 @@ def test_generate_dataset_dispatches_on_task(monkeypatch, tmp_path):
     rec = GenerationConfig.flat(task="recognition", output_dir=str(tmp_path), num_images=2)
     with pytest.raises(_RecError):
         SyntheticDatasetGenerator(rec).generate_dataset()
+
+
+def test_recognition_pools_resolve_backgrounds(monkeypatch):
+    # On-the-fly recognition crops need a real (downloaded) background dir, just
+    # like detection pages - build_recognition_pools must trigger resolution.
+    import generator.dataset_generator as dg
+
+    resolved = {"called": False}
+    monkeypatch.setattr(
+        dg.SyntheticDatasetGenerator, "_resolve_background_dir", lambda self: resolved.__setitem__("called", True)
+    )
+    monkeypatch.setattr(dg.SyntheticDatasetGenerator, "_prepare_train_val", lambda self: (["a"], ["b"]))
+    cfg = GenerationConfig.flat(task="recognition", output_dir="ds", num_images=10)
+    SyntheticDatasetGenerator(cfg).build_recognition_pools()
+    assert resolved["called"]

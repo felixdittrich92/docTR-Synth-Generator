@@ -104,7 +104,12 @@ def recognition_crop(corpus, languages, seed, bg_dir=None):
     words = corpus.build_vocabulary(languages, words_per_language=6000)
     gen = TextImageGenerator(
         GenerationConfig.flat(
-            task="recognition", languages=languages, auto_download_fonts=True, bg_image_dir=bg_dir, **CACHE
+            task="recognition",
+            languages=languages,
+            auto_download_fonts=True,
+            auto_download_backgrounds=False,
+            bg_image_dir=bg_dir,
+            **CACHE,
         )
     )
     random.seed(seed * 13)

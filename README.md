@@ -2,7 +2,7 @@
 ![Build Status](https://github.com/felixdittrich92/docTR-Synth-Generator/workflows/builds/badge.svg)
 [![codecov](https://codecov.io/gh/felixdittrich92/docTR-Synth-Generator/graph/badge.svg?token=31MDR20JGI)](https://codecov.io/gh/felixdittrich92/docTR-Synth-Generator)
 [![CodeFactor](https://www.codefactor.io/repository/github/felixdittrich92/doctr-synth-generator/badge)](https://www.codefactor.io/repository/github/felixdittrich92/doctr-synth-generator)
-[![Pypi](https://img.shields.io/badge/pypi-v0.3.0a0-blue.svg)](https://pypi.org/project/docTR-Synth-Generator/)
+[![Pypi](https://img.shields.io/badge/pypi-v0.3.1a0-blue.svg)](https://pypi.org/project/docTR-Synth-Generator/)
 
 # docTR-Synth-Generator
 A tool to generate synthetic OCR datasets - made for docTR
@@ -331,19 +331,16 @@ treat them the same: recognition yields the label string; detection yields
 from generator.components import GenerationConfig
 from generator.doctr_dataset import build_detection_datasets, synth_worker_init_fn
 
-cfg = GenerationConfig.flat(
-    task="detection",
-    languages=["en", "de"],
-    num_images=50_000,  # POOL size (word variety + vocab coverage)
-    auto_download_backgrounds=True,
-)
+# num_images is the total dataset size; val_percent carves out the val set.
+cfg = GenerationConfig.flat(task="detection", num_images=50_000, val_percent=0.2)
 train_set, val_set = build_detection_datasets(
     cfg,
-    train_samples=args.epochs and 20_000,  # virtual epoch length (len(dataset))
-    val_samples=2_000,
+    languages=["german", "english", "french", "italian", "spanish", "malay"],  # VOCABS keys or ISO codes
     use_polygons=args.rotation,  # straight boxes unless --rotation
-    sample_transforms=batch_transforms,  # the script's existing transforms
+    sample_transforms=sample_transforms,  # the script's image+target transforms
+    img_transforms=img_transforms,  # the script's image-only transforms
 )
+# len(train_set) == 40_000, len(val_set) == 10_000
 ```
 
 **Recognition** - in `references/recognition/train.py`, replace the
@@ -353,26 +350,29 @@ train_set, val_set = build_detection_datasets(
 from generator.components import GenerationConfig
 from generator.doctr_dataset import build_recognition_datasets, synth_worker_init_fn
 
-cfg = GenerationConfig.flat(task="recognition", num_images=100_000)
+cfg = GenerationConfig.flat(task="recognition", num_images=10_000, val_percent=0.2)
 train_set, val_set = build_recognition_datasets(
     cfg,
-    train_samples=50_000,
-    val_samples=5_000,
-    vocab=args.vocab,  # e.g. ["german", "urdu", "odia"] - the model's vocab
+    vocab=args.vocab,  # e.g. ["multilingual"] - a VOCABS key / list = the model's vocab
     img_transforms=img_transforms,  # the script's existing resize/aug
 )
+# len(train_set) == 8_000, len(val_set) == 2_000
 ```
 
 Pass `vocab` the **same vocab you train the model on** - a `VOCABS` key, a
 literal charset, or a list of keys whose union is the model's vocab (e.g.
-`["german", "urdu", "odia"]`). Every generated label is then guaranteed to
-contain only characters in that vocab, so docTR's label encoder never hits an
-out-of-vocab character (which would otherwise crash training on the first batch).
-Corpus words outside the vocab are dropped, character coverage is guaranteed
-*within* the vocab, and the corpus languages are derived from the vocab keys
-automatically (`german` -> `de`); a key with no corpus (e.g. `odia`) still has
-its characters covered via synthesis. Set `config.languages` explicitly to pull
-different corpora. The same restriction applies to the offline generator via
+`["multilingual"]` or `["german", "urdu", "odia"]`). Every generated label is
+then guaranteed to contain only characters in that vocab, so docTR's label
+encoder never hits an out-of-vocab character (which would otherwise crash
+training on the first batch). Corpus words outside the vocab are dropped,
+character coverage is guaranteed *within* the vocab (missing characters are
+synthesised so the set stays balanced), and the corpus languages are derived
+from the vocab keys automatically (`german` -> `de`). For detection, pass
+`languages=[...]` (VOCABS keys like `"german"`, `"malay"`, or ISO codes); for
+recognition you can pass `languages=[...]` too. A combined vocab like
+`"multilingual"` maps to no single language, so pass `languages=[...]` if you
+want real multilingual words rather than mostly-synthesised coverage. The same
+restriction applies to the offline generator via
 `GenerationConfig.flat(target_vocab=[...])`.
 
 The `DataLoader` lines stay as they are - just keep
@@ -394,10 +394,11 @@ train_loader = DataLoader(
 
 Notes:
 
-- **Pool size vs epoch length.** `config.num_images` sizes the word *pool*
-  (variety and per-split vocab coverage); `train_samples` / `val_samples` set
-  the virtual epoch length (`len(dataset)`). Samples are generated fresh, so the
-  epoch length is just how many iterations you want per epoch.
+- **Dataset size & split.** `num_images` is the total dataset size; `val_percent`
+  carves out the validation set, so `len(train_set)` / `len(val_set)` follow
+  directly (50k @ 0.2 -> 40k / 10k). Samples are generated fresh on every access,
+  so this is effectively the iterations per epoch. Pass `train_samples` /
+  `val_samples` only if you want to override the derived sizes.
 - **Seeding.** The train set draws a fresh random sample on every access (new
   data every epoch - the whole point of on-the-fly); the val set is a
   reproducible fixed virtual set (seeded per index) so metrics stay comparable.

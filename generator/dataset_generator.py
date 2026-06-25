@@ -172,6 +172,7 @@ class SyntheticDatasetGenerator:
         reproduces the same balance and per-split character coverage without
         ever touching disk. ``config.core.num_images`` controls the pool size.
         """
+        self._resolve_background_dir()  # so on-the-fly crops get real (downloaded) backgrounds
         return self._prepare_train_val()
 
     def build_detection_pool(self) -> list[str]:
@@ -183,6 +184,16 @@ class SyntheticDatasetGenerator:
         """
         self._resolve_background_dir()
         return self._resolve_word_pool()
+
+    def resolve_backgrounds(self) -> str | None:
+        """Resolve (downloading if needed) the background dir and return it.
+
+        Mutates ``config.resources.bg_image_dir`` to the resolved directory.
+        Useful when rendering pages directly via ``PageGenerator`` instead of
+        going through :meth:`generate_dataset` or the dataset factories.
+        """
+        self._resolve_background_dir()
+        return self.config.resources.bg_image_dir
 
     def _vocab_charset(self) -> set[str] | None:
         """Characters recognition labels must stay within (the model's vocab).

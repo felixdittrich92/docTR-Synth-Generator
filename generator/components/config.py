@@ -155,7 +155,7 @@ class RecognitionConfig:
         padding: padding (pixels) around the text in a crop.
     """
 
-    font_size_range: tuple[int, int] = (15, 40)
+    font_size_range: tuple[int, int] = (12, 40)
     padding: int = 2
 
 
@@ -195,8 +195,8 @@ class RealismConfig:
     bold_width_frac_range: tuple[float, float] = (0.03, 0.06)
     rotation_prob: float = 0.15
     blur_prob: float = 0.2
-    perspective_prob: float = 0.25
-    pixel_dropout_prob: float = 0.15
+    perspective_prob: float = 0.2
+    pixel_dropout_prob: float = 0.05
     rotation_range: tuple[float, float] = (-2, 2)
     blur_radius_range: tuple[float, float] = (0.3, 1.0)
     perspective_margin: int = 2

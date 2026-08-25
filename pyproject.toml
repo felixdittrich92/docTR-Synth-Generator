@@ -58,7 +58,7 @@ dev = [
     "mypy>=0.812",
     "pre-commit>=2.17.0",
     # docTR - from main branch
-    "python-doctr@git+https://github.com/mindee/doctr#egg=main",
+    "python-doctr>=1.1.0",
 ]
 
 [project.urls]

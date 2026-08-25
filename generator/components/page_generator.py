@@ -69,9 +69,11 @@ class PageGenerator:
     def generate_page(self, words: list[str]) -> tuple[Image.Image, list[Polygon]]:
         """Lay out ``words`` on a page and return the page image + word polygons.
 
-        The layout (paragraph, dense newspaper columns, a label/value form or an
-        ID-card with fields) is chosen per :attr:`DetectionConfig.layout`, so
-        a single run can mimic the variety of real documents.
+        The layout (paragraph, dense newspaper columns, a label/value form, an
+        ID-card with fields or a fully vertical page) is chosen per
+        :attr:`DetectionConfig.layout`, so a single run can mimic the variety of
+        real documents. Horizontal layouts additionally carry vertical text
+        regions with probability :attr:`DetectionConfig.vertical_prob`.
         """
         cfg = self.config
         width = random.randint(*cfg.detection.page_width_range)
@@ -95,14 +97,23 @@ class PageGenerator:
         area = (margin, margin, width - margin, height - margin)
         polygons: list[Polygon] = []
 
+        # Carve vertical strips out of the content area *before* the body is laid
+        # out, so vertical and horizontal text can never overlap.
+        area, vertical_regions = self._plan_vertical_regions(area, layout)
+
         if layout == "newspaper":
             self._layout_newspaper(page, area, take_word, rtl, polygons)
         elif layout == "form":
             self._layout_form(page, area, take_word, rtl, polygons)
         elif layout == "id_card":
             self._layout_id_card(page, area, take_word, rtl, polygons)
+        elif layout == "vertical":
+            self._layout_vertical(page, area, take_word, rtl, polygons)
         else:
             self._layout_paragraph(page, area, take_word, rtl, polygons)
+
+        for region in vertical_regions:
+            self._draw_vertical_region(page, region, take_word, polygons)
 
         page = page.convert("RGB")
         if polygons and random.random() < cfg.detection.rotation_prob:
@@ -118,7 +129,13 @@ class PageGenerator:
         cfg = self.config
         if cfg.detection.layout != "mixed":
             return cfg.detection.layout
-        weights = cfg.detection.layout_weights or {"paragraph": 0.4, "newspaper": 0.25, "form": 0.2, "id_card": 0.15}
+        weights = cfg.detection.layout_weights or {
+            "paragraph": 0.34,
+            "newspaper": 0.22,
+            "form": 0.18,
+            "id_card": 0.14,
+            "vertical": 0.12,
+        }
         names = list(weights)
         return random.choices(names, weights=[weights[n] for n in names], k=1)[0]
 
@@ -219,6 +236,235 @@ class PageGenerator:
             y += line_height
             lines += 1
         return y
+
+    # -- vertical text ----------------------------------------------------
+
+    def _choose_vertical_mode(self) -> str:
+        """Pick how a vertical run is drawn: ``"cw"``, ``"ccw"`` or ``"stacked"``."""
+        cfg = self.config.detection
+        if random.random() < cfg.vertical_stacked_prob:
+            return "stacked"
+        return "ccw" if random.random() < cfg.vertical_ccw_prob else "cw"
+
+    def _render_stacked_word(self, word: str, font_size: int, bold_width: int):
+        """Render a word as upright glyphs stacked top-to-bottom (signage / CJK).
+
+        Each glyph is centred in a fixed-height cell so the column keeps an even
+        rhythm even though per-glyph bounding boxes differ ("a" vs "A").
+        """
+        chars = [c for c in word if not c.isspace()]
+        if not chars or len(chars) > self.config.detection.vertical_max_stacked_chars:
+            return None
+        glyphs = []
+        for char in chars:
+            glyph = self._render_word(char, font_size, bold_width)
+            if glyph is None:
+                return None
+            glyphs.append(glyph)
+
+        width = max(g.width for g in glyphs)
+        cell = max(int(font_size * 1.05), max(g.height for g in glyphs))
+        column = Image.new("RGBA", (width, cell * len(glyphs)), (0, 0, 0, 0))
+        for i, glyph in enumerate(glyphs):
+            column.alpha_composite(glyph, ((width - glyph.width) // 2, i * cell + (cell - glyph.height) // 2))
+        return column
+
+    def _render_vertical_word(self, word: str, font_size: int, bold_width: int, mode: str):
+        """Render one word for a vertical run (rotated 90 degrees, or stacked).
+
+        ``"ccw"`` reads bottom-to-top (the usual left-margin annotation),
+        ``"cw"`` reads top-to-bottom (book spines, right-hand tabs) and
+        ``"stacked"`` keeps the glyphs upright.
+        """
+        if mode == "stacked":
+            return self._render_stacked_word(word, font_size, bold_width)
+        coverage = self._render_word(word, font_size, bold_width)
+        if coverage is None:
+            return None
+        rotation = Image.Transpose.ROTATE_90 if mode == "ccw" else Image.Transpose.ROTATE_270
+        return coverage.transpose(rotation)
+
+    def _fill_column(
+        self,
+        page,
+        box,
+        take_word,
+        polygons,
+        font_size,
+        style,
+        bold_width,
+        mode,
+        max_columns=10**9,
+        columns_rtl=True,
+        rule_color=None,
+        col_width=None,
+    ) -> int:
+        """Fill a box with vertical columns of text; return the x boundary reached.
+
+        The transpose of :meth:`_fill_box`: words advance along y inside a column
+        and columns advance along x. Columns run right-to-left by default, as in
+        traditional vertical typesetting. ``col_width`` defaults to the font size
+        scaled by ``vertical_line_spacing_range``; pass it explicitly to make the
+        columns tile a region exactly.
+        """
+        bx0, by0, bx1, by1 = box
+        if col_width is None:
+            spacing = random.uniform(*self.config.detection.vertical_line_spacing_range)
+            col_width = max(font_size + 2, int(font_size * spacing))
+        col_width = max(1, int(col_width))
+        gap = max(2, int(font_size * 0.33))
+        upward = mode == "ccw"  # bottom-to-top reading order
+        cols = 0
+        while cols < max_columns:
+            cx = (bx1 - (cols + 1) * col_width) if columns_rtl else (bx0 + cols * col_width)
+            if cx < bx0 or cx + col_width > bx1:
+                break
+            cursor = by1 if upward else by0
+            col_has_word = False
+            for _ in range(400):  # bounded attempts per column
+                coverage = self._render_vertical_word(take_word(), font_size, bold_width, mode)
+                if coverage is None or coverage.width > bx1 - bx0:
+                    continue
+                wh = coverage.height
+                paste_y = cursor - wh if upward else cursor
+                overflow = (paste_y < by0) if upward else (paste_y + wh > by1)
+                if overflow:
+                    if col_has_word:
+                        break
+                    continue  # single token taller than the box: try another
+                paste_x = cx + (col_width - coverage.width) // 2
+                paste_x = max(bx0, min(paste_x, bx1 - coverage.width))
+                if self._emit(page, coverage, style, paste_x, paste_y, polygons):
+                    col_has_word = True
+                cursor = (paste_y - gap) if upward else (paste_y + wh + gap)
+            if not col_has_word:
+                break
+            cols += 1
+            if rule_color is not None and cols < max_columns:
+                rx = cx if columns_rtl else cx + col_width
+                ImageDraw.Draw(page).line((rx, by0, rx, by1), fill=rule_color, width=1)
+        return (bx1 - cols * col_width) if columns_rtl else (bx0 + cols * col_width)
+
+    def _plan_vertical_regions(self, area, layout: str):
+        """Reserve vertical strips at the edges of ``area``.
+
+        Returns the (possibly narrowed) content area plus the reserved strips.
+        Reserving up front is what keeps vertical and horizontal text from ever
+        colliding - the body layout simply never sees that space.
+        """
+        cfg = self.config.detection
+        if layout in ("vertical", "id_card") or cfg.vertical_prob <= 0:
+            return area, []
+        if random.random() >= cfg.vertical_prob:
+            return area, []
+
+        bx0, by0, bx1, by1 = area
+        regions: list[tuple[int, int, int, int]] = []
+        wanted = 1 if random.random() < 0.8 else 2
+        for _ in range(max(1, min(wanted, cfg.vertical_max_regions))):
+            width = int((bx1 - bx0) * random.uniform(*cfg.vertical_region_width_range))
+            # Leave enough width for a legible strip and a usable body area.
+            if width < 16 or (bx1 - bx0) - width < 160:
+                break
+            gutter = max(4, int(width * 0.3))
+            # Vertical accents rarely span the whole page: shrink from the ends.
+            top = by0 + int((by1 - by0) * random.uniform(0.0, 0.15))
+            bottom = by1 - int((by1 - by0) * random.uniform(0.0, 0.15))
+            if random.random() < 0.5:
+                regions.append((bx0, top, bx0 + width, bottom))
+                bx0 += width + gutter
+            else:
+                regions.append((bx1 - width, top, bx1, bottom))
+                bx1 -= width + gutter
+        return (bx0, by0, bx1, by1), regions
+
+    def _draw_vertical_region(self, page, region, take_word, polygons) -> None:
+        """Render one reserved strip as a margin note or a solid colour banner."""
+        cfg = self.config.detection
+        rx0, ry0, rx1, ry1 = region
+        width = rx1 - rx0
+        if width < 12 or ry1 - ry0 < 40:
+            return
+
+        if random.random() < cfg.vertical_banner_prob:
+            band = random.choice([(38, 62, 120), (28, 90, 70), (120, 40, 48), (60, 55, 80), (35, 35, 42)])
+            ImageDraw.Draw(page).rectangle((rx0, ry0, rx1, ry1), fill=band)
+
+        # A rotated word occupies ~1.3x the font size across the column.
+        font_size = max(9, min(int(width / 1.45), cfg.font_size_range[1]))
+        mode = self._choose_vertical_mode()
+        bold_width = self._heading_bold(font_size) if random.random() < 0.35 else self._maybe_bold(font_size)
+        style = self._style_at(page, rx0, ry0, width, ry1 - ry0, bold_width)
+        self._fill_column(
+            page,
+            region,
+            take_word,
+            polygons,
+            font_size,
+            style,
+            bold_width,
+            mode,
+            max_columns=1,
+            columns_rtl=False,
+            col_width=width,
+        )
+
+    def _layout_vertical(self, page, area, take_word, rtl, polygons) -> None:
+        """A fully vertical page: columns of vertical text, right-to-left.
+
+        Mirrors traditional CJK typesetting and rotated posters/covers: an
+        optional horizontal masthead, an oversized title column on the reading
+        side, then body columns with thin rules between them.
+        """
+        cfg = self.config
+        bx0, by0, bx1, by1 = area
+        draw = ImageDraw.Draw(page)
+        mode = self._choose_vertical_mode()
+        y = by0
+
+        if random.random() < 0.5:  # horizontal masthead above the columns
+            hfs = int(random.randint(*cfg.detection.font_size_range) * random.uniform(1.5, 2.4))
+            hbw = self._heading_bold(hfs)
+            hstyle = self._style_at(page, bx0, y, bx1 - bx0, hfs * 2, hbw)
+            y = self._fill_box(page, (bx0, y, bx1, by1), take_word, polygons, hfs, hstyle, hbw, rtl, max_lines=1)
+            y += int(hfs * 0.3)
+            draw.line((bx0, y, bx1, y), fill=(120, 120, 130), width=1)
+            y += int(hfs * 0.4)
+
+        x = bx1
+        if random.random() < 0.55:  # oversized title column on the first-read side
+            tfs = int(random.randint(*cfg.detection.font_size_range) * random.uniform(1.5, 2.2))
+            tbw = self._heading_bold(tfs)
+            tstyle = self._style_at(page, bx1 - tfs * 2, y, tfs * 2, (by1 - y) // 2, tbw)
+            x = self._fill_column(page, (bx0, y, x, by1), take_word, polygons, tfs, tstyle, tbw, mode, max_columns=1)
+            x -= int(tfs * 0.4)
+
+        # Body columns tile the remaining width exactly, so the page always fills
+        # regardless of how many columns were drawn.
+        lo, hi = cfg.detection.vertical_columns_range
+        spacing = random.uniform(*cfg.detection.vertical_line_spacing_range)
+        ncols = random.randint(lo, hi)
+        col_width = max(14, (x - bx0) // max(1, ncols))
+        font_size = max(9, min(int(col_width / spacing), cfg.detection.font_size_range[1]))
+        col_width = min(col_width, int(font_size * spacing) + 4)  # no oversized gutters
+        ncols = max(1, (x - bx0) // col_width)
+
+        bold_width = self._maybe_bold(font_size)
+        style = self._style_at(page, bx0, y, x - bx0, by1 - y, bold_width)
+        rule = (170, 170, 180) if random.random() < 0.3 else None
+        self._fill_column(
+            page,
+            (bx0, y, x, by1),
+            take_word,
+            polygons,
+            font_size,
+            style,
+            bold_width,
+            mode,
+            max_columns=ncols,
+            rule_color=rule,
+            col_width=col_width,
+        )
 
     def _body_font(self) -> int:
         lo, hi = self.config.detection.font_size_range
@@ -447,6 +693,19 @@ class PageGenerator:
         )
         pad = int(card_h * 0.07)
 
+        # Optional vertical side band, as printed on many residence permits and
+        # access badges. Reserved from the card first so nothing else uses it.
+        side_band = None
+        band_width = int(card_w * random.uniform(0.1, 0.16))
+        if random.random() < self.config.detection.vertical_prob and band_width >= 14 and card_w - band_width > 170:
+            if rtl:
+                side_band = (cx0, cx0 + band_width)
+                cx0 += band_width
+            else:
+                side_band = (cx1 - band_width, cx1)
+                cx1 -= band_width
+            card_w -= band_width
+
         # Header band (issuing authority): a coloured bar with an emblem and light
         # text (the ink is picked automatically from the dark band background).
         band_h = int(card_h * 0.2)
@@ -465,6 +724,10 @@ class PageGenerator:
             tbox = (ex + em + pad, cy0 + (band_h - tfs) // 2, cx1 - pad, cy0 + band_h)
         tstyle = self._style_at(page, tbox[0], tbox[1], tbox[2] - tbox[0], tfs * 1.6, tbw)
         self._fill_box(page, tbox, take_word, polygons, tfs, tstyle, tbw, rtl, max_lines=1)
+
+        if side_band is not None:
+            sx0, sx1 = side_band
+            self._draw_vertical_region(page, (sx0, cy0 + radius, sx1, cy1 - radius), take_word, polygons)
 
         # Photo placeholder under the band.
         body_top = cy0 + band_h + pad

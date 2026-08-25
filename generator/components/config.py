@@ -222,8 +222,24 @@ class DetectionConfig:
         margin_ratio: page margin as a fraction of min(width, height).
         block_gap_range: gap between paragraph blocks (fraction of line height).
         layout: ``"mixed"`` (default), ``"paragraph"``, ``"newspaper"``,
-            ``"form"`` or ``"id_card"``.
+            ``"form"``, ``"id_card"`` or ``"vertical"``.
         layout_weights: weights for the ``"mixed"`` blend.
+        vertical_prob: probability that a *horizontal* page additionally carries
+            a vertical text region (margin note, side banner, spine title). Set
+            to 0 to reproduce the old horizontal-only behaviour.
+        vertical_ccw_prob: share of rotated runs turned counter-clockwise
+            (reading bottom-to-top) instead of clockwise (top-to-bottom).
+        vertical_stacked_prob: share of vertical runs drawn as upright stacked
+            glyphs (CJK / signage style) instead of rotated whole words.
+        vertical_columns_range: number of columns in the ``"vertical"`` layout.
+        vertical_line_spacing_range: column width as a multiple of the font size.
+        vertical_max_regions: max vertical regions carved out of a horizontal page.
+        vertical_region_width_range: width of such a region, as a fraction of the
+            content width.
+        vertical_banner_prob: probability a vertical region is drawn as a solid
+            coloured banner (light ink on dark) rather than plain margin text.
+        vertical_max_stacked_chars: words longer than this are skipped in stacked
+            mode (a 20-glyph column rarely fits and never looks real).
         newspaper_columns_range / newspaper_font_size_range /
             newspaper_line_spacing_range: newspaper density controls.
         max_blocks: safety cap on paragraph blocks per page.
@@ -249,6 +265,15 @@ class DetectionConfig:
     plain_background_prob: float = 0.4
     rotation_prob: float = 0.15
     rotation_range: tuple[float, float] = (-2.5, 2.5)
+    vertical_prob: float = 0.3
+    vertical_ccw_prob: float = 0.6
+    vertical_stacked_prob: float = 0.2
+    vertical_columns_range: tuple[int, int] = (4, 12)
+    vertical_line_spacing_range: tuple[float, float] = (1.25, 1.7)
+    vertical_max_regions: int = 2
+    vertical_region_width_range: tuple[float, float] = (0.06, 0.16)
+    vertical_banner_prob: float = 0.35
+    vertical_max_stacked_chars: int = 12
 
 
 # Sub-config attribute name -> dataclass type.

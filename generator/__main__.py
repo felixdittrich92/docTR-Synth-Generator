@@ -41,7 +41,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--layout",
         metavar="NAME",
-        help="detection layout: mixed | paragraph | newspaper | form | id_card",
+        help="detection layout: mixed | paragraph | newspaper | form | id_card | vertical",
+    )
+    parser.add_argument(
+        "--vertical-prob",
+        type=float,
+        metavar="P",
+        help="detection: probability a horizontal page also carries vertical text (default: 0.3)",
     )
     parser.add_argument("-w", "--workers", type=int, help="worker processes")
     parser.add_argument("--val-percent", type=float, help="validation fraction (default: 0.2)")
@@ -51,6 +57,8 @@ def main(argv: list[str] | None = None) -> None:
     overrides: dict = {}
     if args.layout:
         overrides["det_layout"] = args.layout
+    if args.vertical_prob is not None:
+        overrides["det_vertical_prob"] = args.vertical_prob
     if args.workers is not None:
         overrides["num_workers"] = args.workers
     if args.val_percent is not None:

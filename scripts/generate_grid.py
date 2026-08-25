@@ -20,14 +20,16 @@ from generator.components import GenerationConfig, PageGenerator, TextImageGener
 from generator.components.background_downloader import BackgroundDownloader
 from generator.components.corpus_downloader import CorpusDownloader
 
-# (layout, languages, seed) - one detection page per layout; Arabic id_card shows RTL.
+# (layout, languages, seed, vertical_prob) - one detection page per layout;
+# Arabic id_card shows RTL, the Japanese page shows fully vertical typesetting.
 DETECTION = [
-    ("paragraph", ["en", "de"], 3),
-    ("newspaper", ["en", "de"], 2),
-    ("form", ["en", "de"], 7),
-    ("id_card", ["ar"], 4),
+    ("paragraph", ["en", "de"], 3, 0.0),
+    ("newspaper", ["en", "de"], 2, 1.0),
+    ("form", ["en", "de"], 7, 0.0),
+    ("id_card", ["ar"], 4, 0.0),
+    ("vertical", ["ja"], 11, 0.0),
 ]
-DETECTION_CAPTIONS = ["paragraph", "newspaper", "form", "id_card (RTL)"]
+DETECTION_CAPTIONS = ["paragraph", "newspaper (+ banner)", "form", "id_card (RTL)", "vertical (JA)"]
 
 # (languages, seed) - recognition crops across scripts/fonts/colours.
 RECOGNITION = [
@@ -78,13 +80,14 @@ def resolve_backgrounds():
     return CACHE["background_cache_dir"]
 
 
-def detection_page(corpus, languages, layout, seed, bg_dir=None, w=620, h=860):
+def detection_page(corpus, languages, layout, seed, vertical_prob=0.0, bg_dir=None, w=620, h=860):
     """Render one detection page (PIL image) for a given layout."""
     words = corpus.build_vocabulary(languages, words_per_language=12000)
     cfg = GenerationConfig.flat(
         task="detection",
         languages=languages,
         det_layout=layout,
+        det_vertical_prob=vertical_prob,
         det_rotation_prob=0.0,
         det_page_width_range=(w, w),
         det_page_height_range=(h, h),
@@ -129,7 +132,9 @@ def build_grid(out_path: str, seed: int = 0):
 
     # --- detection row (uniform height) ---
     th = 360
-    pages = [detection_page(corpus, langs, layout, s, bg_dir=bg_dir) for layout, langs, s in DETECTION]
+    pages = [
+        detection_page(corpus, langs, layout, s, vertical_prob=vp, bg_dir=bg_dir) for layout, langs, s, vp in DETECTION
+    ]
     pages = [p.resize((int(p.width * th / p.height), th)) for p in pages]
 
     # --- recognition crops ---
@@ -146,7 +151,10 @@ def build_grid(out_path: str, seed: int = 0):
     font = _font(15)
 
     draw.text(
-        (pad, 5), "Detection - full synthetic pages (every word is boxed in the labels)", fill=(35, 35, 35), font=font
+        (pad, 5),
+        "Detection - full synthetic pages, horizontal and vertical (every word is boxed in the labels)",
+        fill=(35, 35, 35),
+        font=font,
     )
     x, y = pad, cap
     for page, caption in zip(pages, DETECTION_CAPTIONS):

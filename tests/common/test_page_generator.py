@@ -1,3 +1,5 @@
+import random
+
 import numpy as np
 from PIL import Image
 
@@ -131,12 +133,12 @@ def test_rtl_layout_places_words_from_the_right(tiny_font_dir, monkeypatch):
 
 
 def test_choose_layout_respects_explicit(tiny_font_dir):
-    for layout in ("paragraph", "newspaper", "form", "id_card"):
+    for layout in ("paragraph", "newspaper", "form", "id_card", "vertical"):
         assert PageGenerator(_cfg(tiny_font_dir, det_layout=layout))._choose_layout() == layout
 
 
 def test_each_layout_produces_valid_in_bounds_polygons(tiny_font_dir):
-    for layout in ("paragraph", "newspaper", "form", "id_card"):
+    for layout in ("paragraph", "newspaper", "form", "id_card", "vertical"):
         page, polygons = PageGenerator(_cfg(tiny_font_dir, det_layout=layout, det_rotation_prob=0.0)).generate_page(
             WORDS
         )
@@ -175,3 +177,102 @@ def test_newspaper_is_dense_and_denser_than_paragraph(tiny_font_dir):
     para = PageGenerator(_cfg(tiny_font_dir, det_layout="paragraph", **base)).generate_page(WORDS)[1]
     assert len(news) > 200  # genuinely dense newsprint
     assert len(news) > len(para)  # denser than running paragraphs
+
+
+# -- vertical text --------------------------------------------------------
+
+VERTICAL_WORDS = ["vertical", "spine", "margin", "rotated", "column", "seite", "rand"] * 8
+
+
+def _aspect_split(polygons):
+    """Split polygons into (portrait, landscape) by their aspect ratio."""
+    portrait, landscape = [], []
+    for poly in polygons:
+        xs = [pt[0] for pt in poly]
+        ys = [pt[1] for pt in poly]
+        (portrait if (max(ys) - min(ys)) > (max(xs) - min(xs)) else landscape).append(poly)
+    return portrait, landscape
+
+
+def test_render_vertical_word_transposes_the_horizontal_render(tiny_font_dir):
+    pg = PageGenerator(_cfg(tiny_font_dir, rotation_prob=0.0, perspective_prob=0.0, blur_prob=0.0))
+    flat = pg._render_word("vertical", 18, 0)
+    for mode in ("cw", "ccw"):
+        rotated = pg._render_vertical_word("vertical", 18, 0, mode)
+        assert rotated is not None
+        assert (rotated.width, rotated.height) == (flat.height, flat.width)
+
+
+def test_stacked_word_is_a_tall_column(tiny_font_dir):
+    pg = PageGenerator(_cfg(tiny_font_dir, rotation_prob=0.0, perspective_prob=0.0, blur_prob=0.0))
+    stacked = pg._render_vertical_word("abcd", 16, 0, "stacked")
+    assert stacked is not None
+    assert stacked.height > stacked.width
+    # Skipped rather than rendered into an unrealistically long column.
+    assert pg._render_vertical_word("a" * 40, 16, 0, "stacked") is None
+    assert pg._render_vertical_word("", 16, 0, "stacked") is None
+
+
+def test_vertical_layout_yields_mostly_portrait_polygons(tiny_font_dir):
+    _, polygons = PageGenerator(_cfg(tiny_font_dir, det_layout="vertical")).generate_page(VERTICAL_WORDS)
+    portrait, landscape = _aspect_split(polygons)
+    assert len(polygons) > 10
+    assert len(portrait) > len(landscape)  # an optional masthead may stay horizontal
+
+
+def test_vertical_prob_zero_keeps_pages_horizontal(tiny_font_dir):
+    for layout in ("paragraph", "newspaper", "form"):
+        _, polygons = PageGenerator(_cfg(tiny_font_dir, det_layout=layout, det_vertical_prob=0.0)).generate_page(
+            VERTICAL_WORDS
+        )
+        portrait, _ = _aspect_split(polygons)
+        assert portrait == [], layout
+
+
+def test_vertical_regions_appear_on_horizontal_pages(tiny_font_dir):
+    _, polygons = PageGenerator(
+        _cfg(tiny_font_dir, det_layout="paragraph", det_vertical_prob=1.0, det_vertical_stacked_prob=0.0)
+    ).generate_page(VERTICAL_WORDS)
+    portrait, landscape = _aspect_split(polygons)
+    assert portrait, "vertical_prob=1.0 must add a vertical region"
+    assert landscape, "the body text must still be laid out horizontally"
+
+
+def test_vertical_regions_never_overlap_the_body(tiny_font_dir):
+    # The strip is reserved before the body is laid out, so the two must occupy
+    # disjoint x-ranges - any overlap would mean unreadable, double-boxed text.
+    for seed in range(8):
+        random.seed(seed)
+        _, polygons = PageGenerator(
+            _cfg(tiny_font_dir, det_layout="paragraph", det_vertical_prob=1.0, det_vertical_stacked_prob=0.0)
+        ).generate_page(VERTICAL_WORDS)
+        portrait, landscape = _aspect_split(polygons)
+        if not portrait or not landscape:
+            continue
+        spans = lambda poly: (min(pt[0] for pt in poly), max(pt[0] for pt in poly))
+        body = [spans(poly) for poly in landscape]
+        for vx0, vx1 in (spans(poly) for poly in portrait):
+            for bx0, bx1 in body:
+                assert bx1 <= vx0 + 1 or bx0 >= vx1 - 1, seed
+
+
+def test_vertical_polygons_stay_doctr_parseable(tiny_font_dir):
+    _, polygons = PageGenerator(_cfg(tiny_font_dir, det_layout="vertical")).generate_page(VERTICAL_WORDS)
+    arr = np.asarray(polygons, dtype=np.float32)
+    assert arr.ndim == 3 and arr.shape[1:] == (4, 2)
+
+
+def test_ccw_columns_read_bottom_to_top(tiny_font_dir):
+    pg = PageGenerator(
+        _cfg(
+            tiny_font_dir,
+            det_layout="vertical",
+            det_vertical_stacked_prob=0.0,
+            det_vertical_ccw_prob=1.0,
+        )
+    )
+    _, polygons = pg.generate_page(VERTICAL_WORDS)
+    portrait, _ = _aspect_split(polygons)
+    assert len(portrait) >= 2
+    # Consecutive words in a counter-clockwise column stack upwards.
+    assert portrait[1][0][1] < portrait[0][0][1]

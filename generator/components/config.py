@@ -18,6 +18,8 @@ __all__ = [
     "RecognitionConfig",
     "RealismConfig",
     "DetectionConfig",
+    "CaptureConfig",
+    "MediaConfig",
 ]
 
 
@@ -222,7 +224,7 @@ class DetectionConfig:
         margin_ratio: page margin as a fraction of min(width, height).
         block_gap_range: gap between paragraph blocks (fraction of line height).
         layout: ``"mixed"`` (default), ``"paragraph"``, ``"newspaper"``,
-            ``"form"``, ``"id_card"`` or ``"vertical"``.
+            ``"form"``, ``"id_card"``, ``"vertical"``, ``"table"`` or ``"receipt"``.
         layout_weights: weights for the ``"mixed"`` blend.
         vertical_prob: probability that a *horizontal* page additionally carries
             a vertical text region (margin note, side banner, spine title). Set
@@ -247,6 +249,43 @@ class DetectionConfig:
         plain_background_prob: probability of a clean generated paper background
             (texture photos may carry their own unlabelled text).
         rotation_prob / rotation_range: small global page rotation.
+        page_font_coherence: probability that a page pins one font per role
+            instead of re-picking a face for every word (0 = old behaviour).
+        heading_font_prob: probability headings get their own pinned face rather
+            than reusing the body face.
+        ink_deviation_prob: probability a block departs from the page ink - real
+            documents are near-monochrome with the occasional accent.
+        bleed_through_prob: probability that mirrored text from the reverse side
+            of the sheet shows through.
+        bleed_through_alpha_range / bleed_through_blur_range: strength and
+            softness of that show-through.
+        body_point_range: body type size in points, used when the physical media
+            model is enabled (see :class:`MediaConfig`).
+        heading_point_scale: heading size as a multiple of body type.
+        fine_print_prob: probability a block is set as fine print - footnotes,
+            legal small print, table footers.
+        fine_print_point_range: type size for those blocks, in points.
+        function_word_ratio: share of tokens drawn from the short-word bucket, so
+            lines alternate function and content words (0 = uniform sampling).
+        function_word_max_len: length bound of that bucket.
+        punctuation_prob: probability a token carries attached punctuation.
+        table_*: ruled/zebra table layout controls.
+        receipt_*: thermal-receipt layout controls (its page geometry overrides
+            ``page_*_range``, since a receipt is far narrower than any document).
+        handwriting_prob: probability a form/receipt value is written by hand.
+        furniture_prob: probability a page carries furniture - header/footer with
+            a page number, a stamp, a signature, a redaction bar, a logo.
+        stamp_prob / redaction_prob / signature_prob / logo_prob: the mix of
+            furniture, conditional on ``furniture_prob``.
+        edge_truncation_prob: probability a block bleeds past the margin so words
+            are clipped by the page edge.
+        background_texture_std: how much fine detail a texture background may
+            keep, as a residual standard deviation. Photo textures carry
+            structure at glyph scale and amplitude, which no amount of ink
+            contrast can overcome; 0 disables the compression.
+        background_scrim_std: above this luminance spread under a block, a
+            translucent panel is laid down first. One ink per block cannot suit a
+            background that runs bright to dark inside that block; 0 disables it.
     """
 
     page_width_range: tuple[int, int] = (700, 1100)
@@ -274,6 +313,118 @@ class DetectionConfig:
     vertical_region_width_range: tuple[float, float] = (0.06, 0.16)
     vertical_banner_prob: float = 0.35
     vertical_max_stacked_chars: int = 12
+    page_font_coherence: float = 0.9
+    heading_font_prob: float = 0.5
+    ink_deviation_prob: float = 0.12
+    bleed_through_prob: float = 0.15
+    bleed_through_alpha_range: tuple[float, float] = (0.04, 0.13)
+    bleed_through_blur_range: tuple[float, float] = (0.8, 2.2)
+    body_point_range: tuple[float, float] = (8.5, 12.5)
+    heading_point_scale: tuple[float, float] = (1.35, 2.4)
+    fine_print_prob: float = 0.3
+    fine_print_point_range: tuple[float, float] = (5.0, 7.0)
+    function_word_ratio: float = 0.45
+    function_word_max_len: int = 4
+    punctuation_prob: float = 0.18
+    table_prob_ruled: float = 0.6
+    table_zebra_prob: float = 0.3
+    table_columns_range: tuple[int, int] = (3, 6)
+    table_rows_range: tuple[int, int] = (6, 22)
+    receipt_width_range: tuple[int, int] = (300, 460)
+    receipt_height_range: tuple[int, int] = (900, 1800)
+    handwriting_prob: float = 0.35
+    furniture_prob: float = 0.45
+    stamp_prob: float = 0.35
+    redaction_prob: float = 0.25
+    signature_prob: float = 0.3
+    logo_prob: float = 0.4
+    edge_truncation_prob: float = 0.15
+    background_texture_std: float = 14.0
+    background_scrim_std: float = 24.0
+
+
+@dataclass
+class CaptureConfig:
+    """Camera-capture simulation for detection pages (``task="detection"``).
+
+    Without this the page *is* the image: axis-aligned, edge to edge - a flatbed
+    scan. Real captures are a sheet photographed as an object in a scene, so the
+    page is warped, placed on a surface, lit unevenly and slightly out of focus.
+
+    Attributes:
+        prob: probability a page is turned into a photographed capture.
+        page_scale_range: fraction of the frame the page occupies.
+        perspective: corner jitter as a fraction of the short page side.
+        rotation_range: in-plane rotation of the sheet (degrees).
+        shadow_prob / shadow_offset_frac / shadow_blur_frac: drop shadow cast by
+            the sheet onto the surface.
+        illumination_prob / illumination_strength: low-frequency lighting falloff.
+        vignette_prob / vignette_strength: darkening toward the frame corners.
+        glare_prob / glare_strength: a specular highlight blob.
+        motion_blur_prob / motion_blur_length_range: directional camera shake.
+        surface_tone_range: brightness range of the generated surface the sheet
+            rests on (a *generated* surface, never a photo, so no unlabelled
+            text can leak into the frame).
+    """
+
+    prob: float = 0.35
+    page_scale_range: tuple[float, float] = (0.72, 0.95)
+    perspective: float = 0.035
+    rotation_range: tuple[float, float] = (-4.0, 4.0)
+    shadow_prob: float = 0.8
+    shadow_offset_frac: float = 0.012
+    shadow_blur_frac: float = 0.01
+    illumination_prob: float = 0.7
+    illumination_strength: float = 0.28
+    vignette_prob: float = 0.5
+    vignette_strength: float = 0.35
+    glare_prob: float = 0.2
+    glare_strength: float = 0.35
+    motion_blur_prob: float = 0.15
+    motion_blur_length_range: tuple[int, int] = (3, 9)
+    surface_tone_range: tuple[int, int] = (55, 205)
+
+
+@dataclass
+class MediaConfig:
+    """Physical page model and delivery resample for detection pages.
+
+    With ``enabled`` the page stops being an arbitrary pixel rectangle: it is a
+    sheet of a real size, scanned at a real resolution, with type specified in
+    points. That is what makes dense small text possible - a 6pt footnote at
+    300 DPI is 25px, small relative to the page and still sharp - and it is why
+    ``detection.font_size_range`` becomes a safety clamp rather than the primary
+    control. Set ``enabled=False`` to size pages and type directly in pixels, as
+    before.
+
+    Attributes:
+        enabled: use the physical model (page size, DPI, points).
+        dpi_range: capture resolution the page is rendered at.
+        landscape_prob: probability a document format is rotated to landscape.
+        receipt_length_range: receipt roll length, in inches.
+        max_render_megapixels: cap on the rendered page; DPI is reduced rather
+            than the page size when a format would exceed it.
+        delivery_long_edge_range: long edge of the delivered image. Real images
+            are stored smaller than they were captured, and that downscale is
+            where they pick up their softening and aliasing.
+        resample_prob: probability the delivery resample is applied at all.
+        upscale_after_prob: probability the downscaled image is then blown back
+            up - a second generation, as anything that has been through a chat
+            app has had.
+        min_delivery_text_px: the smallest glyph height that must survive *in
+            the delivered image*. Replaces an absolute pixel floor: a page that
+            will be halved has to render its smallest type twice as large.
+    """
+
+    enabled: bool = True
+    dpi_range: tuple[float, float] = (150.0, 300.0)
+    landscape_prob: float = 0.14
+    receipt_length_range: tuple[float, float] = (5.0, 16.0)
+    max_render_megapixels: float = 3.6
+    delivery_long_edge_range: tuple[float, float] = (900.0, 2200.0)
+    resample_prob: float = 0.85
+    upscale_after_prob: float = 0.12
+    min_delivery_text_px: float = 7.0
 
 
 # Sub-config attribute name -> dataclass type.
@@ -286,7 +437,12 @@ _GROUP_TYPES = {
     "recognition": RecognitionConfig,
     "realism": RealismConfig,
     "detection": DetectionConfig,
+    "capture": CaptureConfig,
+    "media": MediaConfig,
 }
+
+# Groups whose flat keyword names carry a prefix to keep them unambiguous.
+_GROUP_PREFIXES = {"detection": "det_", "capture": "capture_", "media": "media_"}
 
 # Flat keyword name -> (sub-config attr, field name). Auto-built from the
 # dataclasses so it stays in sync; detection fields get a ``det_`` prefix and a
@@ -298,10 +454,8 @@ _FLAT_RENAMES = {
 _FLAT_MAP: dict[str, tuple[str, str]] = {}
 for _group, _type in _GROUP_TYPES.items():
     for _f in dataclasses.fields(_type):
-        if _group == "detection":
-            _flat = f"det_{_f.name}"
-        else:
-            _flat = _FLAT_RENAMES.get((_group, _f.name), _f.name)
+        _prefix = _GROUP_PREFIXES.get(_group)
+        _flat = f"{_prefix}{_f.name}" if _prefix else _FLAT_RENAMES.get((_group, _f.name), _f.name)
         _FLAT_MAP[_flat] = (_group, _f.name)
 
 
@@ -321,6 +475,23 @@ class GenerationConfig:
     recognition: RecognitionConfig = field(default_factory=RecognitionConfig)
     realism: RealismConfig = field(default_factory=RealismConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
+    capture: CaptureConfig = field(default_factory=CaptureConfig)
+    media: MediaConfig = field(default_factory=MediaConfig)
+    # Flat option names the caller passed to :meth:`flat`; empty when the config
+    # was built directly from sub-configs.
+    explicit_options: frozenset[str] = field(default_factory=frozenset)
+
+    def pins_page_size(self) -> bool:
+        """Whether the caller pinned the detection page dimensions.
+
+        The media model derives page size from a physical sheet and a DPI, but a
+        caller who set ``det_page_width_range``/``det_page_height_range`` wants
+        those pixels - for a fixed-size training batch, for instance. Silently
+        overriding them is the same class of bug as ignoring the font floor.
+        """
+        if {"det_receipt_width_range", "det_receipt_height_range"} & self.explicit_options:
+            return False  # a pinned receipt roll is its own, more specific pin
+        return bool({"det_page_width_range", "det_page_height_range"} & self.explicit_options)
 
     def __post_init__(self):
         # With neither a wordlist nor explicit languages, default to English so a
@@ -346,4 +517,8 @@ class GenerationConfig:
                 raise TypeError(f"Unknown configuration option: {key!r}")
             group, field_name = mapping
             grouped[group][field_name] = value
-        return cls(**{g: _GROUP_TYPES[g](**vals) for g, vals in grouped.items() if vals})
+        config = cls(**{g: _GROUP_TYPES[g](**vals) for g, vals in grouped.items() if vals})
+        # Remember what was set explicitly: a pinned page size is a contract the
+        # physical media model has to honour rather than quietly override.
+        config.explicit_options = frozenset(kwargs)
+        return config

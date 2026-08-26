@@ -4,6 +4,7 @@
 # See LICENSE or go to <https://opensource.org/licenses/Apache-2.0> for full license details.
 
 import os
+import random
 import tempfile
 import threading
 import urllib.parse
@@ -90,6 +91,20 @@ _SCRIPT_FONTS: dict[str, list[tuple[str, list[str]]]] = {
     "japanese": [("notosansjp", ["NotoSansJP[wght].ttf"])],
     "korean": [("notosanskr", ["NotoSansKR[wght].ttf"])],
     "cjk": [("notosanssc", ["NotoSansSC[wght].ttf"])],
+}
+
+# Handwriting faces, for form values and annotations that a person filled in by
+# hand. Latin and Devanagari only - Google Fonts has no reliable handwriting
+# coverage for most other scripts, and the caller falls back to a printed face.
+_HANDWRITING_FONTS: dict[str, list[tuple[str, list[str]]]] = {
+    "latin": [
+        ("caveat", ["Caveat[wght].ttf", "Caveat-Regular.ttf"]),
+        ("indieflower", ["IndieFlower-Regular.ttf", "IndieFlower.ttf"]),
+        ("shadowsintolight", ["ShadowsIntoLight.ttf"]),
+        ("architectsdaughter", ["ArchitectsDaughter-Regular.ttf", "ArchitectsDaughter.ttf"]),
+        ("patrickhand", ["PatrickHand-Regular.ttf", "PatrickHand.ttf"]),
+    ],
+    "devanagari": [("kalam", ["Kalam-Regular.ttf", "Kalam.ttf"])],
 }
 
 # A small, ordered fallback chain. Noto Sans (latin/greek/cyrillic) is tried
@@ -200,6 +215,30 @@ class FontDownloader:
     def _resolve_script(self, script: str, required_chars: set[str]) -> str | None:
         """Download (or reuse) a font covering ``required_chars`` for ``script``."""
         candidates = _SCRIPT_FONTS.get(script, []) + _FALLBACK_FONTS
+        for family, filenames in candidates:
+            for filename in filenames:
+                with _DOWNLOAD_LOCK:
+                    path = self._download(family, filename)
+                if path and self._covers(path, required_chars):
+                    return path
+        return None
+
+    def resolve_handwriting(self, text: str) -> str | None:
+        """Return a handwriting face covering ``text``, or ``None``.
+
+        ``None`` is a normal outcome, not an error: most scripts have no
+        handwriting face here, and the caller falls back to a printed one.
+        """
+        if not self.enabled:
+            return None
+        required_chars = {c for c in text if not c.isspace()}
+        if not required_chars:
+            return None
+        scripts = self.required_scripts(text) or {"latin"}
+        if len(scripts) != 1:
+            return None
+        candidates = _HANDWRITING_FONTS.get(next(iter(scripts)), [])
+        random.shuffle(candidates := list(candidates))
         for family, filenames in candidates:
             for filename in filenames:
                 with _DOWNLOAD_LOCK:

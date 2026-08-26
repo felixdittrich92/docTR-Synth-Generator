@@ -211,6 +211,16 @@ class _BaseSynthDataset:
     def collate_fn(samples):
         torch = _torch()
         images, targets = zip(*samples)
+        shapes = {tuple(img.shape) for img in images}
+        if len(shapes) > 1:
+            raise RuntimeError(
+                "Cannot batch pages of different sizes: "
+                f"{sorted(shapes)}. Detection pages vary in size by design (physical "
+                "formats, camera capture, delivery resampling). Either pass docTR's "
+                "Resize as sample_transforms, or pin the output size with "
+                "det_page_width_range/det_page_height_range, which also disables "
+                "capture and the delivery resample."
+            )
         return torch.stack(list(images), dim=0), list(targets)
 
 

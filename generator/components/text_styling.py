@@ -7,7 +7,7 @@ import random
 from typing import TypedDict
 
 import numpy as np
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 
 from ..augmentations import AugmentationPipeline, RandomBlur, RandomGaussianNoise, RandomJpegCompression
 from .config import GenerationConfig
@@ -15,6 +15,7 @@ from .legibility import DegradationBudget
 from .text_renderer import TextStyle
 
 __all__ = [
+    "calm_texture",
     "luminance",
     "sample_page_palette",
     "PagePalette",
@@ -41,6 +42,34 @@ class PagePalette(TypedDict):
     deviation_prob: float
 
 
+def _page_contrast(config: GenerationConfig) -> float:
+    """Page-wide ink contrast, drawn from the upper part of the configured range."""
+    lo, hi = config.realism.min_contrast, config.realism.max_contrast
+    return lo + (hi - lo) * random.uniform(config.realism.page_contrast_bias, 1.0)
+
+
+def calm_texture(image: Image.Image, target_std: float) -> Image.Image:
+    """Compress a photo texture's fine detail so glyphs can sit on top of it.
+
+    A background photo carries structure at the same scale *and* amplitude as the
+    strokes, and text placed on it is not low-contrast but camouflaged: no choice
+    of ink separates a glyph from detail its own size. The large-scale look
+    (colour, shading) is kept; only the fine detail is scaled down.
+    """
+    if target_std <= 0:
+        return image
+    rgb = image.convert("RGB")
+    arr = np.asarray(rgb, dtype=np.float32)
+    radius = max(1.5, min(rgb.width, rgb.height) / 12.0)
+    smooth = np.asarray(rgb.filter(ImageFilter.GaussianBlur(radius)), dtype=np.float32)
+    residual = arr - smooth
+    std = float(residual.std())
+    if std <= target_std:
+        return image
+    calmed = smooth + residual * (target_std / std)
+    return Image.fromarray(np.clip(calmed, 0, 255).astype(np.uint8), mode="RGB")
+
+
 def sample_page_palette(config: GenerationConfig) -> PagePalette:
     """Sample one ink identity for a whole page.
 
@@ -55,7 +84,11 @@ def sample_page_palette(config: GenerationConfig) -> PagePalette:
     return PagePalette({
         "colored": colored,
         "hue": hue,
-        "contrast": random.uniform(config.realism.min_contrast, config.realism.max_contrast),
+        # Biased to the upper part of the range. Contrast used to be re-rolled per
+        # block, so a faint draw affected one paragraph; pinning it per page means
+        # one unlucky draw sets the ink for the *whole* document, and a page-wide
+        # 0.45 is a faded photocopy. Faint blocks still occur via ink_deviation_prob.
+        "contrast": _page_contrast(config),
         "opacity": random.randint(*config.realism.text_opacity_range),
         "deviation_prob": config.detection.ink_deviation_prob,
     })
@@ -120,13 +153,34 @@ def decide_text_style(
         ink = base.copy()
 
     ink = ink + np.random.normal(0.0, config.realism.ink_color_jitter, size=3)
+
+    # Guarantee the ink is actually separable from the paper once composited.
+    # Contrast, hue scaling, jitter and opacity each look reasonable alone and
+    # compound into text that is technically drawn and practically invisible, so
+    # the check is applied to the value that reaches the pixel.
+    opacity = followed["opacity"] if followed is not None else random.randint(*config.realism.text_opacity_range)
+    alpha = max(0.05, opacity / 255.0)
+    bg_ref = luminance(avg)
+    needed = config.realism.min_ink_separation / alpha
+    gap = luminance(ink) - bg_ref
+    if abs(gap) < needed:
+        # Push further along the polarity already chosen. Never flip: the
+        # polarity was decided from the background and flipping it here made
+        # ink land on the wrong side for part of a block.
+        direction = -1.0 if dark_text else 1.0
+        target = float(np.clip(bg_ref + direction * needed, 0.0, 255.0))
+        current = max(1e-3, luminance(ink))
+        scaled = ink * (target / current)
+        # Rescaling a saturated hue can clip; fall back to a neutral of the right
+        # luminance rather than let clipping quietly restore the invisible ink.
+        ink = scaled if scaled.max() <= 255.0 else np.full(3, target, dtype=np.float64)
+
     fill_color = tuple(int(np.clip(c, 0, 255)) for c in ink)
 
     outline_color = None
     if outline_width > 0:
         outline_color = (245, 245, 245) if dark_text else (15, 15, 15)
 
-    opacity = followed["opacity"] if followed is not None else random.randint(*config.realism.text_opacity_range)
     return TextStyle(
         fill_color=fill_color,
         opacity=opacity,

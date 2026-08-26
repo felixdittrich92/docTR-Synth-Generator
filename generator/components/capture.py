@@ -107,25 +107,34 @@ def _illuminate(config: GenerationConfig, image: Image.Image) -> Image.Image:
 
     # Lighting must not flatten the page: a field that darkens without bound
     # drags ink and paper together until noise and JPEG finish the job.
-    field = np.clip(field, 0.55, 1.25)
-    full = np.asarray(
-        Image.fromarray(field, mode="F").resize((width, height), Image.Resampling.BILINEAR), dtype=np.float32
-    )
-    arr *= full[:, :, None]
-
+    glare = np.zeros_like(field)
     if random.random() < cfg.glare_prob:
         cx, cy = random.uniform(0.15, 0.85), random.uniform(0.15, 0.85)
         sx, sy = random.uniform(0.05, 0.22), random.uniform(0.05, 0.22)
-        blob = np.exp(-(((xx - cx) ** 2) / (2 * sx**2) + ((yy - cy) ** 2) / (2 * sy**2)))
-        blob *= cfg.glare_strength * random.uniform(0.5, 1.0)
-        blob_full = np.asarray(
-            Image.fromarray(blob.astype(np.float32), mode="F").resize((width, height), Image.Resampling.BILINEAR),
+        glare = np.exp(-(((xx - cx) ** 2) / (2 * sx**2) + ((yy - cy) ** 2) / (2 * sy**2)))
+        glare = (glare * cfg.glare_strength * random.uniform(0.5, 1.0)).astype(np.float32)
+
+    # Both stages scale local contrast: a multiplicative field scales ink and
+    # paper together, and a highlight lifting toward white compresses what is
+    # left. Individually each is mild; a 0.55 field under a 0.35 highlight leaves
+    # 36% of the original separation, which is where a page loses its text. Bound
+    # the *combined* attenuation rather than each stage on its own.
+    floor = cfg.min_contrast_factor
+    field = np.clip(field, floor, 1.25)
+    glare = np.clip(glare, 0.0, np.clip(1.0 - floor / np.maximum(field, 1e-3), 0.0, 1.0))
+
+    def _upsample(grid):
+        return np.asarray(
+            Image.fromarray(grid.astype(np.float32), mode="F").resize((width, height), Image.Resampling.BILINEAR),
             dtype=np.float32,
         )[:, :, None]
+
+    arr *= _upsample(field)
+    if glare.any():
         # Lift toward white instead of multiplying and clipping: multiplying
         # sends paper past 255 while ink stays put, so the highlight silently
         # erases the text it covers.
-        arr = arr + blob_full * (255.0 - arr)
+        arr = arr + _upsample(glare) * (255.0 - arr)
 
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGB")
 

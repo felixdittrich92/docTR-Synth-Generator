@@ -13,10 +13,12 @@ from PIL import Image
 from .background_manager import BackgroundManager
 from .config import GenerationConfig
 from .font_selector import FontSelector
+from .legibility import DegradationBudget
 from .text_renderer import TextRenderer, TextStyle
 from .text_styling import (
     apply_final_degradations,
     build_final_augmentations,
+    calm_texture,
     decide_text_style,
     recolor_coverage,
 )
@@ -83,9 +85,15 @@ class TextImageGenerator:
         """Recolour a black coverage glyph to the ink colour, reusing its alpha."""
         return recolor_coverage(coverage, style)
 
-    def _apply_final_degradations(self, image: Image.Image) -> Image.Image:
-        """Brightness/contrast jitter + sensor noise + JPEG artifacts on the crop."""
-        return apply_final_degradations(self.config, image, self.final_augs)
+    def _apply_final_degradations(self, image: Image.Image, text_height: float | None = None) -> Image.Image:
+        """Brightness/contrast jitter + sensor noise + JPEG artifacts on the crop.
+
+        Recognition crops are budgeted by glyph height exactly as detection pages
+        are: a blur that is invisible on a 40px crop closes the counters on a
+        12px one, and the model is asked to read the result either way.
+        """
+        budget = DegradationBudget.for_text_height(text_height) if text_height else None
+        return apply_final_degradations(self.config, image, self.final_augs, budget)
 
     def generate_image(self, text: str) -> Image.Image | None:
         """Generate a single text overlay image.
@@ -114,17 +122,22 @@ class TextImageGenerator:
             return None
 
         bg_crop = self.background_manager.get_background_crop(coverage.size)
+        # Calm the texture *before* choosing ink, so the decision is made against
+        # the background the glyph will actually sit on.
+        bg_crop = calm_texture(bg_crop, self.config.realism.crop_texture_std)
         style = self._decide_style(bg_crop, bold_width, outline_width)
 
         if outline_width > 0 and style.outline_color is not None:
             # Rarer two-tone path: re-render with the styled fill + outline.
             glyph = self.text_renderer.render_text_to_image(text, font_path, style, font_size)
-            bg_crop = self.background_manager.get_background_crop(glyph.size)
+            bg_crop = calm_texture(
+                self.background_manager.get_background_crop(glyph.size), self.config.realism.crop_texture_std
+            )
         else:
             glyph = self._recolor(coverage, style)
 
         composed = Image.alpha_composite(bg_crop.convert("RGBA"), glyph).convert("RGB")
-        return self._apply_final_degradations(composed)
+        return self._apply_final_degradations(composed, text_height=coverage.height)
 
     @staticmethod
     def worker_process(task_queue: mp.Queue, result_queue: mp.Queue, config: GenerationConfig, worker_id: int):

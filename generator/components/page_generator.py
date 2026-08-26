@@ -582,6 +582,35 @@ class PageGenerator:
             return "stacked"
         return "ccw" if random.random() < cfg.vertical_ccw_prob else "cw"
 
+    @staticmethod
+    def _is_stackable(text: str) -> bool:
+        """Whether upright glyph-by-glyph stacking is right for this text.
+
+        Stacking is a CJK convention: the glyphs are square, so a column reads
+        naturally. Latin, Cyrillic and Arabic are not - stacking them spells a
+        word letter-under-letter, which outside of a shop sign no document does.
+        Short numerals and single marks are fine either way, since they occur
+        stacked on real signage and labels.
+        """
+        chars = [c for c in text if not c.isspace()]
+        if not chars:
+            return False
+        if len(chars) <= 2 and all(c.isdigit() or not c.isalpha() for c in chars):
+            return True  # "12", "%", "-" read fine upright
+        for char in chars:
+            code = ord(char)
+            cjk = (
+                0x3000 <= code <= 0x30FF  # CJK punctuation, kana
+                or 0x3400 <= code <= 0x4DBF  # extension A
+                or 0x4E00 <= code <= 0x9FFF  # unified ideographs
+                or 0xAC00 <= code <= 0xD7AF  # hangul
+                or 0xF900 <= code <= 0xFAFF  # compatibility ideographs
+                or 0xFF00 <= code <= 0xFFEF  # fullwidth forms
+            )
+            if not cjk:
+                return False
+        return True
+
     def _render_stacked_word(self, word: str, font_size: int, bold_width: int, role: str = "body"):
         """Render a word as upright glyphs stacked top-to-bottom (signage / CJK).
 
@@ -605,7 +634,9 @@ class PageGenerator:
             column.alpha_composite(glyph, ((width - glyph.width) // 2, i * cell + (cell - glyph.height) // 2))
         return column
 
-    def _render_vertical_word(self, word: str, font_size: int, bold_width: int, mode: str, role: str = "body"):
+    def _render_vertical_word(
+        self, word: str, font_size: int, bold_width: int, mode: str, role: str = "body", fallback: str = "ccw"
+    ):
         """Render one word for a vertical run (rotated 90 degrees, or stacked).
 
         ``"ccw"`` reads bottom-to-top (the usual left-margin annotation),
@@ -613,7 +644,11 @@ class PageGenerator:
         ``"stacked"`` keeps the glyphs upright.
         """
         if mode == "stacked":
-            return self._render_stacked_word(word, font_size, bold_width, role)
+            if self._is_stackable(word):
+                return self._render_stacked_word(word, font_size, bold_width, role)
+            # A column drawing mixed scripts keeps one rotation for the whole
+            # column, so the fallback is decided once by the caller.
+            mode = fallback
         coverage = self._render_word(word, font_size, bold_width, role)
         if coverage is None:
             return None
@@ -649,7 +684,12 @@ class PageGenerator:
             spacing = random.uniform(*self.config.detection.vertical_line_spacing_range)
             col_width = max(font_size + 2, int(font_size * spacing))
         col_width = max(1, int(col_width))
-        gap = max(2, int(font_size * 0.33))
+        fallback = "ccw" if random.random() < self.config.detection.vertical_ccw_prob else "cw"
+        # Rotated words need more air between them than stacked glyphs do: a
+        # stacked CJK column is meant to be tight, whereas rotated Latin words
+        # run into each other and read as one long token.
+        gap_scale = 0.33 if mode == "stacked" else random.uniform(*self.config.detection.vertical_word_gap_range)
+        gap = max(2, int(font_size * gap_scale))
         upward = mode == "ccw"  # bottom-to-top reading order
         cols = 0
         while cols < max_columns:
@@ -659,7 +699,7 @@ class PageGenerator:
             cursor = by1 if upward else by0
             col_has_word = False
             for _ in range(400):  # bounded attempts per column
-                coverage = self._render_vertical_word(take_word(), font_size, bold_width, mode, role)
+                coverage = self._render_vertical_word(take_word(), font_size, bold_width, mode, role, fallback)
                 if coverage is None or coverage.width > bx1 - bx0:
                     continue
                 wh = coverage.height

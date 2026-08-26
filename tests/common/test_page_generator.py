@@ -214,13 +214,15 @@ def test_render_vertical_word_transposes_the_horizontal_render(tiny_font_dir):
 
 
 def test_stacked_word_is_a_tall_column(tiny_font_dir):
+    # Uses _render_stacked_word directly: "abcd" is Latin, so the public
+    # _render_vertical_word would (correctly) rotate it instead of stacking.
     pg = PageGenerator(_cfg(tiny_font_dir, rotation_prob=0.0, perspective_prob=0.0, blur_prob=0.0))
-    stacked = pg._render_vertical_word("abcd", 16, 0, "stacked")
+    stacked = pg._render_stacked_word("abcd", 16, 0)
     assert stacked is not None
     assert stacked.height > stacked.width
     # Skipped rather than rendered into an unrealistically long column.
-    assert pg._render_vertical_word("a" * 40, 16, 0, "stacked") is None
-    assert pg._render_vertical_word("", 16, 0, "stacked") is None
+    assert pg._render_stacked_word("a" * 40, 16, 0) is None
+    assert pg._render_stacked_word("", 16, 0) is None
 
 
 def test_vertical_layout_yields_mostly_portrait_polygons(tiny_font_dir):
@@ -240,12 +242,19 @@ def test_vertical_prob_zero_keeps_pages_horizontal(tiny_font_dir):
 
 
 def test_vertical_regions_appear_on_horizontal_pages(tiny_font_dir):
-    _, polygons = PageGenerator(
+    # Seeded and repeated: a strip narrower than legible type is skipped by
+    # design, so a single unseeded page is not a fair test.
+    generator = PageGenerator(
         _cfg(tiny_font_dir, det_layout="paragraph", det_vertical_prob=1.0, det_vertical_stacked_prob=0.0)
-    ).generate_page(VERTICAL_WORDS)
-    portrait, landscape = _aspect_split(polygons)
-    assert portrait, "vertical_prob=1.0 must add a vertical region"
-    assert landscape, "the body text must still be laid out horizontally"
+    )
+    with_strip = 0
+    for seed in range(8):
+        random.seed(seed)
+        _, polygons = generator.generate_page(VERTICAL_WORDS)
+        portrait, landscape = _aspect_split(polygons)
+        assert landscape, "the body text must still be laid out horizontally"
+        with_strip += bool(portrait)
+    assert with_strip >= 4, f"vertical_prob=1.0 produced a strip on only {with_strip}/8 pages"
 
 
 def test_vertical_regions_never_overlap_the_body(tiny_font_dir):
@@ -772,3 +781,177 @@ def test_handwriting_font_names_resolve(tiny_font_dir):
             assert filenames, "each family needs a filename"
             assert all(name.endswith(".ttf") for name in filenames)
             assert len(filenames) >= 1
+
+
+def test_page_contrast_is_drawn_from_the_upper_range(tiny_font_dir):
+    # Contrast is pinned per page, so a faint draw fades the whole document.
+    from generator.components.text_styling import sample_page_palette
+
+    cfg = _cfg(tiny_font_dir, min_contrast=0.45, max_contrast=0.95)
+    values = [sample_page_palette(cfg)["contrast"] for _ in range(200)]
+    assert min(values) >= 0.45 + (0.95 - 0.45) * cfg.realism.page_contrast_bias - 1e-9
+    assert max(values) <= 0.95
+
+
+def test_ink_stays_separable_from_the_paper(tiny_font_dir):
+    # Contrast, hue scaling, jitter and opacity each look fine alone and compound
+    # into text that is drawn but invisible.
+    from generator.components.text_styling import decide_text_style, luminance
+
+    cfg = _cfg(tiny_font_dir, min_contrast=0.02, max_contrast=0.05, colored_ink_prob=1.0)
+    paper = Image.new("RGB", (40, 20), (250, 250, 250))
+    for _ in range(60):
+        style = decide_text_style(cfg, paper, bold_width=0, outline_width=0)
+        alpha = style.opacity / 255.0
+        effective = abs(luminance(style.fill_color) - 250.0) * alpha
+        assert effective > cfg.realism.min_ink_separation * 0.75
+
+
+def test_recognition_crops_are_budgeted_by_glyph_size(tiny_font_dir):
+    from generator.components.generator import TextImageGenerator
+
+    generator = TextImageGenerator(_cfg(tiny_font_dir, final_blur_prob=1.0, final_blur_radius_range=(4.0, 4.0)))
+    image = generator.generate_image("small")
+    assert image is not None
+    arr = np.asarray(image.convert("L"), dtype=np.float32)
+    assert arr.max() - arr.min() > 40  # a 4px blur would have flattened the crop
+
+
+def test_numeric_tokens_cover_symbols_and_currencies(tiny_font_dir):
+    # Frequency word lists contain no digits, operators or currency at all.
+    from generator.components.corpus_downloader import generate_numeric_tokens
+
+    tokens = generate_numeric_tokens(800, seed=0)
+    symbols = {ch for token in tokens for ch in token if not ch.isalnum() and ch != " "}
+    assert len(symbols) >= 25, sorted(symbols)
+    for expected in "+-%=@#&/:()[]":
+        assert expected in symbols, expected
+    with_currency = [t for t in tokens if any(c in t for c in "€$£¥₹")]
+    assert len(with_currency) / len(tokens) > 0.05
+    standalone = [t for t in tokens if len(t) == 1 and not t.isalnum()]
+    assert standalone, "crops of a single symbol must occur"
+
+
+def test_ordinal_suffixes_match_their_number():
+    import re
+
+    from generator.components.corpus_downloader import generate_numeric_tokens
+
+    for token in generate_numeric_tokens(2000, seed=1):
+        match = re.match(r"^(\d+)(st|nd|rd|th)$", token)
+        if not match:
+            continue
+        number, suffix = int(match.group(1)), match.group(2)
+        expected = {1: "st", 2: "nd", 3: "rd"}.get(number if number < 20 else number % 10, "th")
+        if 11 <= number <= 13:
+            expected = "th"
+        assert suffix == expected, token
+
+
+def test_texture_behind_a_crop_is_calmed(tiny_font_dir):
+    # A photo crop carries structure at glyph scale, which camouflages strokes
+    # no matter what ink is chosen.
+    from generator.components.text_styling import calm_texture
+
+    rng = np.random.default_rng(0)
+    noisy = Image.fromarray(rng.integers(0, 255, (24, 60, 3), dtype=np.uint8), mode="RGB")
+    calmed = calm_texture(noisy, 10.0)
+    assert np.asarray(calmed, dtype=np.float32).std() < np.asarray(noisy, dtype=np.float32).std() / 2
+    assert calm_texture(noisy, 0.0) is noisy  # disabled
+
+
+def test_handwriting_filenames_have_no_invented_fallbacks():
+    # Every alternate here is only reached *after* the real file 404s, so an
+    # unverified guess cannot rescue anything and guarantees a 404 on the way.
+    from generator.components.font_downloader import _HANDWRITING_FONTS
+
+    known = {
+        "Caveat[wght].ttf",
+        "IndieFlower-Regular.ttf",
+        "ShadowsIntoLight.ttf",
+        "ArchitectsDaughter-Regular.ttf",
+        "PatrickHand-Regular.ttf",
+        "Kalam-Regular.ttf",
+    }
+    for faces in _HANDWRITING_FONTS.values():
+        for _family, filenames in faces:
+            assert set(filenames) <= known, filenames
+
+
+def test_only_cjk_is_stacked_upright(tiny_font_dir):
+    # Stacking is a CJK convention. Stacking Latin spells a word
+    # letter-under-letter, which no document outside a shop sign does.
+    assert PageGenerator._is_stackable("設計師")
+    assert PageGenerator._is_stackable("日本語")
+    assert PageGenerator._is_stackable("12")  # numerals read fine upright
+    assert PageGenerator._is_stackable("%")
+    assert not PageGenerator._is_stackable("NUTRITIOUS")
+    assert not PageGenerator._is_stackable("consider")
+    assert not PageGenerator._is_stackable("Büsche")
+    assert not PageGenerator._is_stackable("Привет")
+    assert not PageGenerator._is_stackable("12月")  # mixed: rotate the whole run
+    assert not PageGenerator._is_stackable("")
+
+
+def test_latin_falls_back_to_rotation_in_a_stacked_column(tiny_font_dir):
+    pg = PageGenerator(_cfg(tiny_font_dir, rotation_prob=0.0, perspective_prob=0.0, blur_prob=0.0))
+    pg._begin_page()
+    stacked = pg._render_vertical_word("NUTRITIOUS", 18, 0, "stacked", fallback="ccw")
+    rotated = pg._render_vertical_word("NUTRITIOUS", 18, 0, "ccw")
+    assert stacked is not None and rotated is not None
+    assert stacked.size == rotated.size  # it rotated instead of stacking
+
+
+def test_no_latin_word_is_ever_stacked_on_a_vertical_page(tiny_font_dir):
+    stacked_words = []
+    generator = PageGenerator(_cfg(tiny_font_dir, det_layout="vertical", det_vertical_stacked_prob=1.0))
+    original = generator._render_stacked_word
+
+    def spy(word, font_size, bold_width, role="body"):
+        stacked_words.append(word)
+        return original(word, font_size, bold_width, role)
+
+    generator._render_stacked_word = spy
+    for seed in range(4):
+        random.seed(seed)
+        generator.generate_page(WORDS)
+    assert not [w for w in stacked_words if any(c.isalpha() and c.isascii() for c in w)]
+
+
+def test_rotated_columns_leave_more_room_between_words(tiny_font_dir):
+    # Rotated words run into each other and read as one long token when spaced
+    # like stacked CJK glyphs.
+    cfg = _cfg(tiny_font_dir)
+    lo, hi = cfg.detection.vertical_word_gap_range
+    assert lo >= 0.35 and hi > lo
+
+
+def test_lighting_cannot_flatten_local_contrast(tiny_font_dir):
+    # Falloff and glare each scale local contrast, and it is their product that
+    # erases text, so the pair is bounded together rather than one at a time.
+    cfg = _cfg(
+        tiny_font_dir,
+        capture_glare_prob=1.0,
+        capture_glare_strength=1.0,
+        capture_illumination_prob=1.0,
+        capture_illumination_strength=1.0,
+        capture_vignette_prob=1.0,
+        capture_vignette_strength=1.0,
+    )
+    floor = cfg.capture.min_contrast_factor
+    assert 0.0 < floor < 1.0
+
+    from generator.components.capture import _illuminate
+
+    bars = np.zeros((80, 80, 3), dtype=np.uint8)
+    bars[::4] = 255  # alternating ink/paper rows
+    before = np.asarray(Image.fromarray(bars, mode="RGB").convert("L"), dtype=np.float32)
+    for seed in range(6):
+        random.seed(seed)
+        np.random.seed(seed)
+        lit = _illuminate(cfg, Image.fromarray(bars, mode="RGB"))
+        after = np.asarray(lit.convert("L"), dtype=np.float32)
+        kept = (np.percentile(after, 95) - np.percentile(after, 5)) / (
+            np.percentile(before, 95) - np.percentile(before, 5)
+        )
+        assert kept > floor * 0.85, f"lighting kept only {kept:.2f} of the contrast"

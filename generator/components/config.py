@@ -96,7 +96,11 @@ class CorpusConfig:
         min_word_length / max_word_length: length bounds (characters).
         filter_by_script: drop words whose script doesn't match the language.
         casing_variant_prob: probability of adding a Title/UPPER variant per word.
-        numeric_token_ratio: fraction of the vocab filled with numbers/dates/codes.
+        numeric_token_ratio: fraction of the vocab filled with numbers, prices,
+            dates, codes, units, operators and standalone symbols. Frequency word
+            lists contain none of these, yet they are everywhere on invoices,
+            receipts, forms and IDs - 0.05 left currency symbols at roughly 0.5%
+            of the dataset. Note a restrictive ``charset`` filters them back out.
         seed: optional RNG seed for reproducible vocabularies.
     """
 
@@ -105,7 +109,7 @@ class CorpusConfig:
     max_word_length: int = 24
     filter_by_script: bool = True
     casing_variant_prob: float = 0.3
-    numeric_token_ratio: float = 0.05
+    numeric_token_ratio: float = 0.18
     seed: int | None = None
 
 
@@ -171,6 +175,15 @@ class RealismConfig:
         ink_color_jitter: per-channel std-dev of ink colour jitter.
         colored_ink_prob: probability of colourful (vs near-neutral) ink.
         outline_prob / outline_width_frac_range: contrasting glyph outline.
+        page_contrast_bias: where in the contrast range a page's pinned ink is
+            drawn from (0 = anywhere, 1 = always max). Contrast is page-wide, so
+            a low draw fades the whole document rather than one block.
+        crop_texture_std: how much fine detail a background photo may keep behind
+            text. Structure at glyph scale camouflages strokes no matter what ink
+            is chosen; 0 disables the compression.
+        min_ink_separation: guaranteed luminance separation between ink and paper
+            *after* opacity is applied. Contrast, hue scaling, jitter and opacity
+            each look reasonable alone and compound into invisible text.
         min_contrast / max_contrast: ink-vs-background contrast bounds [0, 1].
         invert_prob: probability of inverting polarity on mid-tone backgrounds.
         bold_prob / bold_width_frac_range: faux-bold probability and stroke width.
@@ -191,6 +204,9 @@ class RealismConfig:
     outline_prob: float = 0.05
     outline_width_frac_range: tuple[float, float] = (0.02, 0.045)
     min_contrast: float = 0.45
+    page_contrast_bias: float = 0.45
+    min_ink_separation: float = 62.0
+    crop_texture_std: float = 10.0
     max_contrast: float = 0.95
     invert_prob: float = 0.15
     bold_prob: float = 0.3
@@ -242,6 +258,8 @@ class DetectionConfig:
             coloured banner (light ink on dark) rather than plain margin text.
         vertical_max_stacked_chars: words longer than this are skipped in stacked
             mode (a 20-glyph column rarely fits and never looks real).
+        vertical_word_gap_range: space between rotated words in a vertical column,
+            as a multiple of the font size. Stacked CJK columns stay tight.
         newspaper_columns_range / newspaper_font_size_range /
             newspaper_line_spacing_range: newspaper density controls.
         max_blocks: safety cap on paragraph blocks per page.
@@ -299,7 +317,7 @@ class DetectionConfig:
     newspaper_columns_range: tuple[int, int] = (3, 6)
     newspaper_font_size_range: tuple[int, int] = (9, 15)
     newspaper_line_spacing_range: tuple[float, float] = (1.05, 1.2)
-    max_blocks: int = 60
+    max_blocks: int = 48
     heading_prob: float = 0.3
     plain_background_prob: float = 0.4
     rotation_prob: float = 0.15
@@ -313,6 +331,7 @@ class DetectionConfig:
     vertical_region_width_range: tuple[float, float] = (0.06, 0.16)
     vertical_banner_prob: float = 0.35
     vertical_max_stacked_chars: int = 12
+    vertical_word_gap_range: tuple[float, float] = (0.4, 0.75)
     page_font_coherence: float = 0.9
     heading_font_prob: float = 0.5
     ink_deviation_prob: float = 0.12
@@ -321,7 +340,7 @@ class DetectionConfig:
     bleed_through_blur_range: tuple[float, float] = (0.8, 2.2)
     body_point_range: tuple[float, float] = (8.5, 12.5)
     heading_point_scale: tuple[float, float] = (1.35, 2.4)
-    fine_print_prob: float = 0.3
+    fine_print_prob: float = 0.22
     fine_print_point_range: tuple[float, float] = (5.0, 7.0)
     function_word_ratio: float = 0.45
     function_word_max_len: int = 4
@@ -333,11 +352,11 @@ class DetectionConfig:
     receipt_width_range: tuple[int, int] = (300, 460)
     receipt_height_range: tuple[int, int] = (900, 1800)
     handwriting_prob: float = 0.35
-    furniture_prob: float = 0.45
-    stamp_prob: float = 0.35
-    redaction_prob: float = 0.25
-    signature_prob: float = 0.3
-    logo_prob: float = 0.4
+    furniture_prob: float = 0.3
+    stamp_prob: float = 0.15
+    redaction_prob: float = 0.12
+    signature_prob: float = 0.2
+    logo_prob: float = 0.3
     edge_truncation_prob: float = 0.15
     background_texture_std: float = 14.0
     background_scrim_std: float = 24.0
@@ -362,6 +381,9 @@ class CaptureConfig:
         vignette_prob / vignette_strength: darkening toward the frame corners.
         glare_prob / glare_strength: a specular highlight blob.
         motion_blur_prob / motion_blur_length_range: directional camera shake.
+        min_contrast_factor: the least local contrast lighting may leave, as a
+            fraction of the original. Falloff and glare each scale contrast, and
+            the product is what erases text, so the pair is bounded together.
         surface_tone_range: brightness range of the generated surface the sheet
             rests on (a *generated* surface, never a photo, so no unlabelled
             text can leak into the frame).
@@ -383,6 +405,7 @@ class CaptureConfig:
     motion_blur_prob: float = 0.15
     motion_blur_length_range: tuple[int, int] = (3, 9)
     surface_tone_range: tuple[int, int] = (55, 205)
+    min_contrast_factor: float = 0.68
 
 
 @dataclass
@@ -498,6 +521,15 @@ class GenerationConfig:
         # bare config "just works" without any local resources.
         if self.resources.wordlist_path is None and self.core.languages is None:
             self.core.languages = ["en"]
+
+        # ``val_percent`` is a fraction despite the name. Passing 15 for "15%"
+        # silently produced a 77% validation split rather than 15%, so it is
+        # rejected outright instead of quietly ruining the dataset.
+        val = self.core.val_percent
+        if not 0.0 <= val < 1.0:
+            raise ValueError(
+                f"val_percent must be a fraction in [0, 1), got {val!r}. For a 15% validation split pass 0.15, not 15."
+            )
 
     @classmethod
     def flat(cls, **kwargs) -> "GenerationConfig":

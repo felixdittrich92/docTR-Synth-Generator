@@ -96,15 +96,18 @@ _SCRIPT_FONTS: dict[str, list[tuple[str, list[str]]]] = {
 # Handwriting faces, for form values and annotations that a person filled in by
 # hand. Latin and Devanagari only - Google Fonts has no reliable handwriting
 # coverage for most other scripts, and the caller falls back to a printed face.
+# Every filename here was verified against google/fonts. Guessed alternates are
+# deliberately absent: an unverified fallback is only ever tried after the real
+# file has failed, so it cannot rescue anything and guarantees a 404 on the way.
 _HANDWRITING_FONTS: dict[str, list[tuple[str, list[str]]]] = {
     "latin": [
-        ("caveat", ["Caveat[wght].ttf", "Caveat-Regular.ttf"]),
-        ("indieflower", ["IndieFlower-Regular.ttf", "IndieFlower.ttf"]),
+        ("caveat", ["Caveat[wght].ttf"]),
+        ("indieflower", ["IndieFlower-Regular.ttf"]),
         ("shadowsintolight", ["ShadowsIntoLight.ttf"]),
-        ("architectsdaughter", ["ArchitectsDaughter-Regular.ttf", "ArchitectsDaughter.ttf"]),
-        ("patrickhand", ["PatrickHand-Regular.ttf", "PatrickHand.ttf"]),
+        ("architectsdaughter", ["ArchitectsDaughter-Regular.ttf"]),
+        ("patrickhand", ["PatrickHand-Regular.ttf"]),
     ],
-    "devanagari": [("kalam", ["Kalam-Regular.ttf", "Kalam.ttf"])],
+    "devanagari": [("kalam", ["Kalam-Regular.ttf"])],
 }
 
 # A small, ordered fallback chain. Noto Sans (latin/greek/cyrillic) is tried
@@ -243,8 +246,30 @@ class FontDownloader:
             for filename in filenames:
                 with _DOWNLOAD_LOCK:
                     path = self._download(family, filename)
-                if path and self._covers(path, required_chars):
+                if path is None:
+                    continue  # this filename is gone upstream; try the next one
+                # The file exists: whether it covers the text is a property of the
+                # face, so move to the next *family* rather than requesting more
+                # filenames from this one that would only 404.
+                return (
+                    path
+                    if self._covers(path, required_chars)
+                    else self._next_family(candidates, family, required_chars)
+                )
+        return None
+
+    def _next_family(self, candidates, after: str, required_chars: set[str]) -> str | None:
+        """Continue the search at the family following ``after``."""
+        remaining = candidates[[f for f, _ in candidates].index(after) + 1 :]
+        for family, filenames in remaining:
+            for filename in filenames:
+                with _DOWNLOAD_LOCK:
+                    path = self._download(family, filename)
+                if path is None:
+                    continue
+                if self._covers(path, required_chars):
                     return path
+                break
         return None
 
     def resolve(self, text: str) -> str | None:

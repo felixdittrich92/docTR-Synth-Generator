@@ -122,7 +122,7 @@ cached (later runs are offline). Providing your own `font_dir` / `wordlist_path`
   scripts), so far fewer languages need synthesised words. Any character still
   missing from the corpus is then synthesised. Two realism helpers are on by
   default: `casing_variant_prob` (0.3) adds Title/UPPERCASE variants, and
-  `numeric_token_ratio` (0.05) mixes in numbers, dates and prices.
+  `numeric_token_ratio` (0.18) mixes in numbers, dates and prices.
 - **Backgrounds** - with no `bg_image_dir`, a curated background set is downloaded
   instead of blank pages. Disable with `auto_download_backgrounds=False`, or pass
   a `background_manifest_url` for your own collection.
@@ -329,7 +329,7 @@ is a real sheet - A4, Letter, Legal, A5, Tabloid, a 58/80mm thermal roll, an ID-
 card - scanned at `media_dpi_range` (150-300 DPI), and type is specified in
 **points**: `det_body_point_range` (8.5-12.5pt) for body copy and
 `det_fine_print_point_range` (5-7pt) for the footnotes, legal small print and
-table footers that `det_fine_print_prob` (0.3) sprinkles through a page. A 6pt
+table footers that `det_fine_print_prob` (0.22) sprinkles through a page. A 6pt
 footnote at 300 DPI is 25px - genuinely small relative to the sheet, and sharp.
 
 `media_landscape_prob` (0.14) rotates document formats, and
@@ -356,12 +356,9 @@ the primary control. Set `media_enabled=False` to size pages and type directly
 in pixels as before.
 
 ```python
-GenerationConfig.flat(
-    task="detection",
-    media_dpi_range=(200, 400),
-    det_fine_print_prob=0.5,  # more small print
-    media_delivery_long_edge_range=(1200, 2600),
-)
+GenerationConfig.flat(task="detection", media_dpi_range=(200, 400),
+                      det_fine_print_prob=0.5,          # more small print
+                      media_delivery_long_edge_range=(1200, 2600))
 ```
 
 Measured over 40 default pages, before and after:
@@ -393,9 +390,10 @@ which of it is text:
 | Redaction bar | **no** | covers the ink, so the words it hides are removed from the labels too |
 | Signature squiggle | **no** | handwriting-shaped, but not a word |
 
-Furniture appears with probability `det_furniture_prob` (0.45), mixed via
-`det_stamp_prob`, `det_logo_prob`, `det_redaction_prob` and
-`det_signature_prob`. Logos and barcodes are deliberately left out of
+Furniture appears with probability `det_furniture_prob` (0.3), mixed via
+`det_stamp_prob` (0.15), `det_logo_prob` (0.3), `det_redaction_prob` (0.12)
+and `det_signature_prob` (0.2). Stamps are the lowest of these on purpose:
+they land *on top of* words, so a stamp reaches roughly 4.5% of pages. Logos and barcodes are deliberately left out of
 `labels.json`: they are the false positives a detector has to learn to ignore.
 
 **Handwriting.** With probability `det_handwriting_prob` (0.35) a form or
@@ -431,6 +429,37 @@ page. So this reproduces the *statistics* rather than real language, which is
 what changes the geometry the detector sees. Set `det_function_word_ratio=0.0`
 and `det_punctuation_prob=0.0` for the old uniform draws.
 
+### Keeping text readable
+
+Realism and legibility pull against each other, and several of the knobs below
+exist because the naive combination produced text that was technically drawn and
+practically invisible. Each is a floor, never a boost: they clamp what the other
+settings ask for, so your configuration remains the ceiling.
+
+- **Ink separation.** `min_ink_separation` (62) is the guaranteed luminance gap
+  between ink and paper *after* opacity is applied. Contrast, hue scaling, colour
+  jitter and opacity each look reasonable alone and compound into unreadable
+  text.
+- **Page ink.** Contrast is pinned per page (see coherence below), so a faint
+  draw fades the whole document rather than one block. `page_contrast_bias`
+  (0.45) draws it from the upper part of `min_contrast`..`max_contrast`; faint
+  *blocks* still occur via `det_ink_deviation_prob`.
+- **Backgrounds.** A photo carries structure at glyph scale and amplitude, which
+  camouflages strokes no matter what ink is chosen. `det_background_texture_std`
+  (14) and `crop_texture_std` (10, recognition crops) compress that fine detail;
+  `det_background_scrim_std` (24) lays a translucent panel under a block whose
+  background runs bright to dark. Set any of them to 0 to disable.
+- **Degradation budget.** Blur is destructive relative to *stroke width*, not in
+  absolute pixels, so one global radius cannot suit 10px and 30px type. Blur,
+  motion smear, JPEG quality and noise are all capped from the smallest glyph on
+  the page, measured at the delivered resolution.
+- **Lighting.** `capture_min_contrast_factor` (0.68) bounds the *combined*
+  attenuation of falloff, vignette and glare. Individually each is mild; their
+  product is what erases text.
+- **Type size.** `font_size_range[0]` is a hard floor, not a hint: a layout that
+  cannot fit type at that size changes its geometry instead - a table drops
+  columns, a vertical strip too narrow for legible type is skipped.
+
 ### Vertical words
 
 Real pages are not purely horizontal: margin annotations, book spines, rotated
@@ -459,7 +488,13 @@ Each run is drawn in one of three modes:
 
 `det_vertical_ccw_prob` (0.6) splits the two rotated modes;
 `det_vertical_stacked_prob` (0.2) decides how often the stacked mode is used
-instead. Stacked mode centres each glyph in a fixed-height cell so latin columns
+instead. **Stacking only applies to CJK.** Its glyphs are square, so a column
+of them reads naturally; stacking Latin, Cyrillic or Arabic spells a word
+letter-under-letter, which no document does outside a shop sign. Anything
+else in a stacked column rotates instead, with the orientation chosen once
+per column - which is how real vertical Japanese handles embedded Latin.
+Rotated words are spaced by `det_vertical_word_gap_range` (0.4-0.75 of the
+font size); stacked CJK columns stay tighter. Stacked mode centres each glyph in a fixed-height cell so latin columns
 keep an even rhythm, and skips words longer than
 `det_vertical_max_stacked_chars` (12), which never fit convincingly. Column
 count and spacing for the `"vertical"` layout come from
@@ -512,12 +547,9 @@ so labels stay pixel-exact at any warp strength. A captured page skips the flat
 `det_rotation_*` rotation, since its rotation is already in the homography.
 
 ```python
-GenerationConfig.flat(
-    task="detection",
-    capture_prob=0.6,  # more phone captures
-    capture_perspective=0.05,  # stronger warp
-    det_bleed_through_prob=0.25,
-)
+GenerationConfig.flat(task="detection", capture_prob=0.6,  # more phone captures
+                      capture_perspective=0.05,            # stronger warp
+                      det_bleed_through_prob=0.25)
 ```
 
 ```bash
@@ -541,6 +573,14 @@ Non-Latin scripts work out of the box: words and fonts are resolved per language
 complex scripts are shaped correctly (Arabic joining, Indic conjuncts), and
 right-to-left languages (Arabic, Hebrew, ...) are laid out right-to-left so pages
 read naturally. For example `languages=["ar"]`, `["he"]`, `["zh"]` or `["hi"]`.
+
+> **Pinning the page size pins the output size.** Setting
+> `det_page_width_range` / `det_page_height_range` switches off camera capture,
+> the delivery resample and the expanding page rotation, since each of them
+> changes the image dimensions. Use it when you need uniformly-sized tensors -
+> for example to batch the on-the-fly dataset below without a `Resize`
+> transform. Pinned `det_receipt_*` ranges are treated as the more specific pin
+> and still win for the receipt layout.
 
 ## Plug into docTR training (on-the-fly, in-RAM)
 
@@ -661,14 +701,36 @@ synthetic glyphs. The pipeline applies, all configurable:
   erosion) and image-space degradations after (Gaussian sensor noise, JPEG
   compression artifacts, blur, brightness/contrast jitter) - matching how a real
   capture degrades the whole frame.
+- Page-level coherence: one font per role and one ink per page, rather than a
+  fresh choice per word and per block (`det_page_font_coherence`,
+  `det_ink_deviation_prob`).
+- Camera capture for detection pages: perspective homography, a generated
+  surface, drop shadow, uneven lighting, glare and camera shake, with the
+  word polygons carried through the same homography (`capture_*`).
+- Bleed-through from the reverse of the sheet, deliberately left out of the
+  ground truth (`det_bleed_through_prob`).
 - Optional JPEG output (`output_jpeg=True`) to match real document captures.
 
 ## Performance & memory
 
+Detection pages cost roughly **2.3 ms per word**, single-core, and that figure is
+flat with page size - the generator scales linearly with how much text is on the
+page, not with the page area itself. At defaults (a physical sheet, ~1700 words)
+that is about 3.8 s/page on one core; `media_enabled=False` gives smaller,
+sparser pages at about 1.4 s/page. Roughly 42% of the time is per-word glyph
+rasterising, 23% per-word augmentation and 18% camera capture.
+
+Workers are independent processes, so throughput scales close to linearly with
+`num_workers`: ~15 pages/min on one core becomes ~240/min on sixteen, or 10k
+pages in about 40 minutes. The other levers, in order of effect:
+`media_max_render_megapixels` (3.6, caps page area and cost tracks area),
+`det_max_blocks`, `capture_prob` (worth ~0.6 s/page), and `supersample` (3,
+quadratic on rasterising but at a quality cost).
+
 Font objects and decoded background images are cached, giving a large throughput
 improvement over re-loading them per sample. Memory stays bounded and tunable:
 
-- `bg_cache_size` (16): number of decoded backgrounds held in memory per worker.
+- `bg_cache_size` (50): number of decoded backgrounds held in memory per worker.
   Lower it on memory-constrained machines or with many workers; raise it for more
   background variety. `bg_max_dimension` (2000) downscales very large backgrounds
   on load so the cache stays light regardless of source resolution.
@@ -694,22 +756,30 @@ Most runs need only a handful of options - the ones you are most likely to set
 | `num_images` | core | `1000` | total samples (split by `val_percent`) |
 | `task` | core | `"recognition"` | `"recognition"` crops or `"detection"` pages |
 | `languages` | core | `["en"]` | ISO 639-1 codes; resolves words, fonts and shaping |
-| `val_percent` | core | `0.2` | validation fraction |
+| `val_percent` | core | `0.2` | validation **fraction**, not a percentage - `0.15`, not `15` (out-of-range values raise) |
 | `num_workers` | core | `4` | parallel worker processes |
 | `output_jpeg` | core | `False` | write JPEG instead of PNG |
 | `target_vocab` | coverage | `None` | recognition: restrict labels to a `VOCABS` key / list (the `vocab=` arg) |
 | `det_layout` | detection | `"mixed"` | detection: `mixed`/`paragraph`/`newspaper`/`form`/`id_card`/`vertical`/`table`/`receipt` |
 | `det_vertical_prob` | detection | `0.3` | detection: chance a horizontal page also carries vertical text (0 = off) |
 | `capture_prob` | capture | `0.35` | detection: chance a page is rendered as a camera capture (0 = off) |
-| `det_furniture_prob` | detection | `0.45` | detection: chance of headers, stamps, logos, redaction, signatures |
+| `det_furniture_prob` | detection | `0.3` | detection: chance of headers, stamps, logos, redaction, signatures |
 | `media_enabled` | media | `True` | detection: physical page sizes, DPI and point-sized type (False = pixel pages) |
 | `media_dpi_range` | media | `(150, 300)` | detection: scan resolution pages are rendered at |
 | `language_balance` | balance | `"balanced"` | `"balanced"` or `"proportional"` allocation across languages |
 | `min_char_coverage` | balance | `0` | ensure every character appears >= N times (0 = off) |
+| `numeric_token_ratio` | corpus | `0.18` | share of the vocab that is numbers, prices, dates, units and symbols |
+| `det_fine_print_prob` | detection | `0.22` | detection: chance a block is set as 5-7pt fine print |
+| `det_handwriting_prob` | detection | `0.35` | detection: chance a form/receipt value is hand-written |
 | `wordlist_path` / `font_dir` / `bg_image_dir` | resources | `None` | bring your own resources (skips the matching download) |
 
-For the complete set of options (realism, augmentation and detection-layout
-knobs), see the sub-config dataclasses in `generator/components/config.py`.
+The table above is deliberately short. Every option is documented in the
+sub-config dataclasses in `generator/components/config.py` - `CoreConfig`,
+`ResourcesConfig`, `CorpusConfig`, `BalanceConfig`, `CoverageConfig`,
+`RecognitionConfig`, `RealismConfig`, `DetectionConfig`, `CaptureConfig` and
+`MediaConfig` - each with an `Attributes:` docstring explaining what the knob is
+for, not just what it sets. Any field name there works as a flat keyword, with
+`det_` for detection, `capture_` for capture and `media_` for media.
 
 ## Resources
 

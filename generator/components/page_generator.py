@@ -284,7 +284,13 @@ class PageGenerator:
         sample = page.crop((x0, y0, x1, y1)).convert("RGB")
         threshold = self.config.detection.background_scrim_std
         if threshold > 0 and np.asarray(sample.convert("L"), dtype=np.float32).std() > threshold:
-            pad = max(2, int((y1 - y0) * 0.12))
+            # The pad exists to cover ascenders and descenders, so it scales with
+            # the *line* height. Scaling it with the region height meant a
+            # full-page vertical strip padded by ~230px and painted the scrim
+            # straight over the neighbouring column - which had already been
+            # drawn, since vertical regions render last. It cut words in half:
+            # "back" pale on the scrim, "ed" dark beside it.
+            pad = max(2, min(int(max(6.0, h) * 0.12), 12))
             box = (
                 max(0, x0 - pad),
                 max(0, y0 - pad),

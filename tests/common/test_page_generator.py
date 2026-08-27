@@ -955,3 +955,28 @@ def test_lighting_cannot_flatten_local_contrast(tiny_font_dir):
             np.percentile(before, 95) - np.percentile(before, 5)
         )
         assert kept > floor * 0.85, f"lighting kept only {kept:.2f} of the contrast"
+
+
+def test_scrim_never_paints_outside_its_region(tiny_font_dir):
+    # The scrim pad used to scale with the region height, so a full-page vertical
+    # strip padded by ~230px and painted over the neighbouring column - which had
+    # already been drawn, since vertical regions render last. It cut words in
+    # half: pale on the scrim, dark beside it.
+    pg = PageGenerator(_cfg(tiny_font_dir, det_background_scrim_std=1.0))
+    pg._begin_page()
+
+    rng = np.random.default_rng(0)
+    noisy = rng.integers(0, 255, (900, 600, 3), dtype=np.uint8)
+    page = Image.fromarray(noisy, mode="RGB").convert("RGBA")
+    before = np.asarray(page.convert("RGB"), dtype=np.int16)
+
+    # A narrow strip spanning almost the whole page height, as a vertical region.
+    pg._style_at(page, 250, 20, 60, 30, 0, extent=850)
+    after = np.asarray(page.convert("RGB"), dtype=np.int16)
+
+    changed = np.abs(after - before).sum(axis=2) > 0
+    assert changed.any(), "the scrim should have fired on this background"
+    ys, xs = np.nonzero(changed)
+    # Painted columns must stay within the strip plus a small line-height pad.
+    assert xs.min() >= 250 - 16, f"scrim reached x={xs.min()}, left of the strip"
+    assert xs.max() <= 310 + 16, f"scrim reached x={xs.max()}, right of the strip"

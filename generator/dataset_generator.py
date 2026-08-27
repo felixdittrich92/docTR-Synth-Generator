@@ -83,6 +83,8 @@ class SyntheticDatasetGenerator:
         language balancing and a stratified split.
         """
         cfg = self.config
+        # An explicit wordlist has no language strata, so only an explicit
+        # target_vocab can restrict it.
         charset = self._vocab_charset()
 
         if cfg.resources.wordlist_path is not None:
@@ -107,6 +109,12 @@ class SyntheticDatasetGenerator:
         if not languages and not target:
             languages = ["en"]
             target = self._coverage_target(languages)
+
+        # Now that the languages are known, they can supply the vocab to restrict
+        # to when the caller did not name one.
+        charset = self._vocab_charset(languages)
+        if charset:
+            print(f"  vocab restriction: labels limited to {len(charset)} characters.")
 
         language_pools: dict[str, list[str]] = {}
         if languages:
@@ -210,17 +218,30 @@ class SyntheticDatasetGenerator:
         self._resolve_background_dir()
         return self.config.resources.bg_image_dir
 
-    def _vocab_charset(self) -> set[str] | None:
+    def _vocab_charset(self, languages: list[str] | None = None) -> set[str] | None:
         """Characters recognition labels must stay within (the model's vocab).
 
-        Returns the union character set of ``target_vocab`` when restriction is
-        enabled, else ``None`` (no restriction). Used to drop any word a docTR
-        model trained on that vocab could not encode.
+        An explicit ``target_vocab`` wins. Otherwise the union of the vocabs the
+        requested *languages* imply is used - the same mapping ``_coverage_target``
+        already relies on. Without that fallback, ``restrict_to_vocab=True`` with
+        the default ``target_vocab=None`` restricted nothing, so a label could
+        contain characters the docTR model for those languages cannot encode.
+
+        Returns ``None`` (no restriction) when restriction is off or nothing
+        resolves.
         """
         cfg = self.config
         if not cfg.coverage.restrict_to_vocab:
             return None
-        return resolve_vocab_charset(cfg.coverage.target_vocab)
+        explicit = resolve_vocab_charset(cfg.coverage.target_vocab)
+        if explicit:
+            return explicit
+        chars: set[str] = set()
+        for lang in languages or []:
+            resolved = resolve_target_vocab(lang, None)
+            if resolved:
+                chars |= resolved
+        return chars or None
 
     def _coverage_target(self, languages: list[str]) -> set[str] | None:
         """Union of vocab characters to guarantee, or None when disabled/unknown."""

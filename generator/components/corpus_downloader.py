@@ -294,18 +294,48 @@ def generate_numeric_tokens(n: int, seed: int | None = None) -> list[str]:
     """
     rng = random.Random(seed)
     tokens: list[str] = []
+    kinds = [
+        "int",
+        "int",
+        "decimal",
+        "decimal",
+        "price",
+        "price",
+        "price",
+        "date",
+        "date",
+        "code",
+        "percent",
+        "phone",
+        "signed",
+        "range",
+        "measure",
+        "time",
+        "reference",
+        "ordinal",
+        "math",
+        "bracketed",
+        "symbol",
+        "contact",
+    ]
     for _ in range(n):
-        kind = rng.choice(["int", "decimal", "price", "date", "code", "percent", "phone"])
+        kind = rng.choice(kinds)
         if kind == "int":
             tokens.append(str(rng.randint(0, 999999)))
         elif kind == "decimal":
             dec = rng.choice([",", "."])
             tokens.append(f"{rng.randint(0, 9999)}{dec}{rng.randint(0, 99):02d}")
         elif kind == "price":
-            sym = rng.choice(["€", "$", "£", ""])
+            # Currency almost always carries a symbol or a code - a bare amount is
+            # the "int"/"decimal" case, so leaving it in here made symbols rare.
+            sym = rng.choice(["€", "€", "$", "$", "£", "¥", "₹", "CHF", "kr", "zł", "R$"])
             dec = rng.choice([",", "."])
-            amt = f"{rng.randint(0, 9999)}{dec}{rng.randint(0, 99):02d}"
-            tokens.append(f"{amt}{sym}" if sym in ("€", "") else f"{sym}{amt}")
+            whole = f"{rng.randint(0, 999):,}".replace(",", rng.choice([".", " ", ","]))
+            amt = f"{whole}{dec}{rng.randint(0, 99):02d}" if rng.random() < 0.7 else str(rng.randint(1, 9999))
+            trailing = sym in ("€", "kr", "zł", "CHF")
+            tokens.append(
+                f"{amt} {sym}" if trailing and rng.random() < 0.4 else (f"{amt}{sym}" if trailing else f"{sym}{amt}")
+            )
         elif kind == "date":
             sep = rng.choice([".", "/", "-"])
             d, m, y = rng.randint(1, 28), rng.randint(1, 12), rng.randint(1990, 2030)
@@ -315,6 +345,92 @@ def generate_numeric_tokens(n: int, seed: int | None = None) -> list[str]:
             tokens.append(f"{letters}-{rng.randint(100, 99999)}")
         elif kind == "percent":
             tokens.append(f"{rng.randint(0, 100)}%")
-        else:  # phone
-            tokens.append(f"+{rng.randint(1, 99)}{rng.randint(100, 999)}{rng.randint(100000, 9999999)}")
+        elif kind == "phone":
+            tokens.append(f"+{rng.randint(1, 99)} {rng.randint(100, 999)} {rng.randint(10000, 999999)}")
+        elif kind == "signed":  # deltas in reports and statements
+            sign = rng.choice(["+", "-", "\u2212"])
+            dec = rng.choice([",", "."])
+            tokens.append(f"{sign}{rng.randint(0, 9999)}{dec}{rng.randint(0, 99):02d}")
+        elif kind == "range":
+            sep = rng.choice(["-", "\u2013", "/", "..."])
+            lo = rng.randint(1, 500)
+            tokens.append(f"{lo}{sep}{lo + rng.randint(1, 400)}")
+        elif kind == "measure":
+            unit = rng.choice(["kg", "g", "mm", "cm", "m", "km", "ml", "l", "\u00b0C", "%", "pcs", "St.", "x"])
+            value = f"{rng.randint(0, 999)}" if rng.random() < 0.6 else f"{rng.randint(0, 99)},{rng.randint(0, 9)}"
+            tokens.append(f"{value} {unit}" if rng.random() < 0.4 else f"{value}{unit}")
+        elif kind == "time":
+            tokens.append(
+                f"{rng.randint(0, 23):02d}:{rng.randint(0, 59):02d}"
+                + (f":{rng.randint(0, 59):02d}" if rng.random() < 0.3 else "")
+            )
+        elif kind == "reference":
+            tokens.append(rng.choice(["#", "Nr.", "No.", "Ref.", "*", "\u00a7"]) + str(rng.randint(1, 99999)))
+        elif kind == "ordinal":
+            num = rng.randint(1, 99)
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(num if num < 20 else num % 10, "th")
+            if 11 <= num <= 13:
+                suffix = "th"
+            tokens.append(rng.choice([f"{num}.", f"{num}{suffix}", f"({num})"]))
+        elif kind == "math":
+            tokens.append(
+                rng.choice([
+                    f"{rng.randint(1, 99)}={rng.randint(1, 99)}",
+                    f"{rng.randint(1, 99)}\u00d7{rng.randint(1, 99)}",
+                    f"{rng.randint(1, 99)}+{rng.randint(1, 99)}",
+                    f"{rng.randint(1, 99)}/{rng.randint(1, 99)}",
+                    f"<{rng.randint(1, 999)}",
+                    f">{rng.randint(1, 999)}",
+                    f"~{rng.randint(1, 999)}",
+                ])
+            )
+        elif kind == "bracketed":  # negatives in ledgers, footnote markers
+            tokens.append(
+                rng.choice([
+                    f"({rng.randint(1, 9999)},{rng.randint(0, 99):02d})",
+                    f"[{rng.randint(1, 99)}]",
+                    f"{{{rng.randint(1, 99)}}}",
+                ])
+            )
+        elif kind == "symbol":  # standalone marks, which crops contain on their own
+            tokens.append(
+                rng.choice([
+                    "+",
+                    "-",
+                    "\u00d7",
+                    "=",
+                    "%",
+                    "&",
+                    "@",
+                    "#",
+                    "*",
+                    "/",
+                    "\\",
+                    "|",
+                    ":",
+                    ";",
+                    "(",
+                    ")",
+                    "[",
+                    "]",
+                    "\u00a7",
+                    "\u00b0",
+                    "\u2022",
+                    "\u2014",
+                    "\u2192",
+                    "\u00bd",
+                    "\u00a9",
+                    "\u00ae",
+                    "\u2122",
+                ])
+            )
+        else:  # contact
+            user = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(rng.randint(3, 8)))
+            tokens.append(
+                rng.choice([
+                    f"{user}@{rng.choice(['mail', 'web', 'post'])}.{rng.choice(['de', 'com', 'org'])}",
+                    f"www.{user}.{rng.choice(['de', 'com'])}",
+                    f"DE{rng.randint(10, 99)} {rng.randint(1000, 9999)} {rng.randint(1000, 9999)}",
+                ])
+            )
     return tokens

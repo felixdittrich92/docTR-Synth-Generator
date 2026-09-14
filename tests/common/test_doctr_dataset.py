@@ -254,3 +254,57 @@ def test_build_latex_recognition_datasets(monkeypatch):
     assert set(train.formulas).isdisjoint(val.formulas)  # disjoint train/val formulas
     img, label = train[0]
     assert img.shape[0] == 3 and set(label) <= set(VOCABS["latex"])
+
+
+def test_vocab_restriction_falls_back_to_the_languages_vocabs(tiny_font_dir):
+    # restrict_to_vocab defaults to True but target_vocab defaults to None, which
+    # used to restrict nothing at all - so labels could carry characters the
+    # docTR model for those languages cannot encode.
+    from generator.components import GenerationConfig
+    from generator.dataset_generator import SyntheticDatasetGenerator
+
+    cfg = GenerationConfig.flat(
+        task="recognition", languages=["en", "de"], output_dir="/tmp/_vocab_check", num_images=4
+    )
+    charset = SyntheticDatasetGenerator(cfg)._vocab_charset(["en", "de"])
+    assert charset and len(charset) > 50
+    assert "a" in charset and "ä" in charset
+
+    off = GenerationConfig.flat(
+        task="recognition",
+        languages=["en", "de"],
+        output_dir="/tmp/_vocab_check",
+        num_images=4,
+        restrict_to_vocab=False,
+    )
+    assert SyntheticDatasetGenerator(off)._vocab_charset(["en", "de"]) is None
+
+
+def test_numeric_tokens_outside_the_vocab_are_dropped(tiny_font_dir):
+    from generator.components.corpus_downloader import generate_numeric_tokens
+    from generator.components.vocab_coverage import filter_in_vocab, resolve_target_vocab
+
+    allowed: set[str] = set()
+    for lang in ("en", "de"):
+        resolved = resolve_target_vocab(lang, None)
+        if resolved:
+            allowed |= resolved
+    tokens = generate_numeric_tokens(500, seed=0)
+    kept = filter_in_vocab(tokens, allowed)
+    assert 0 < len(kept) < len(tokens), "some tokens must survive, and some must be dropped"
+    assert all(all(ch in allowed for ch in token) for token in kept)
+
+
+def test_val_percent_must_be_a_fraction():
+    # The name says percent but the value is a fraction. Passing 15 for "15%"
+    # silently produced a 77% validation split instead of failing.
+    from generator.components import GenerationConfig
+
+    with pytest.raises(ValueError, match="fraction"):
+        GenerationConfig.flat(val_percent=15)
+    with pytest.raises(ValueError, match="fraction"):
+        GenerationConfig.flat(val_percent=1.0)
+    with pytest.raises(ValueError, match="fraction"):
+        GenerationConfig.flat(val_percent=-0.1)
+    assert GenerationConfig.flat(val_percent=0.15).core.val_percent == 0.15
+    assert GenerationConfig.flat(val_percent=0.0).core.val_percent == 0.0

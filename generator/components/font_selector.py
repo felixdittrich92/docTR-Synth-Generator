@@ -41,6 +41,10 @@ class FontSelector:
     ):
         self.font_dir = font_dir
         self.font_support_table: dict[str, set[str]] = {}
+        # Handwriting faces live in the same support table (so they can be
+        # rendered) but are excluded from ordinary printed-text resolution -
+        # otherwise a downloaded script face leaks into body copy.
+        self.handwriting_fonts: set[str] = set()
 
         if font_cache_dir is None:
             font_cache_dir = os.path.join(font_dir, "_downloaded") if font_dir else ".font_cache"
@@ -49,7 +53,7 @@ class FontSelector:
 
         self._load_fonts()
         # cache: frozenset(required_chars) -> font_path, to avoid re-resolving
-        self._text_font_cache: dict[frozenset, str | None] = {}
+        self._text_font_cache: dict = {}
 
         if not self.font_support_table and not auto_download:
             raise ValueError(
@@ -96,6 +100,42 @@ class FontSelector:
                 supported_chars.update(chr(cp) for cp in cmap.cmap.keys())
         return supported_chars
 
+    def get_handwriting_font(self, text: str) -> str | None:
+        """Get a handwriting face covering ``text``, or ``None`` if there is none.
+
+        Local fonts whose filename marks them as handwriting are preferred; only
+        then is one downloaded. Returning ``None`` is expected for scripts with
+        no handwriting face available - callers fall back to a printed font.
+        """
+        required_chars = frozenset(c for c in text if not c.isspace())
+        local = [
+            path
+            for path, chars in self.font_support_table.items()
+            if required_chars.issubset(chars) and (path in self.handwriting_fonts or self._looks_handwritten(path))
+        ]
+        if local:
+            return random.choice(local)
+        if not self.auto_download:
+            return None
+
+        key = ("__hand__", required_chars)
+        if key in self._text_font_cache:
+            return self._text_font_cache[key]
+        downloaded = self.downloader.resolve_handwriting(text)
+        if downloaded:
+            self._register_font(downloaded)
+            self.handwriting_fonts.add(downloaded)
+        self._text_font_cache[key] = downloaded
+        return downloaded
+
+    @staticmethod
+    def _looks_handwritten(font_path: str) -> bool:
+        name = os.path.basename(font_path).lower()
+        return any(
+            marker in name
+            for marker in ("caveat", "indieflower", "shadowsintolight", "architectsdaughter", "patrickhand", "kalam")
+        )
+
     def get_font_for_text(self, text: str) -> str | None:
         """Get a font that supports all characters in ``text``.
 
@@ -112,7 +152,11 @@ class FontSelector:
         """
         required_chars = frozenset(c for c in text if not c.isspace())
 
-        matching_fonts = [path for path, chars in self.font_support_table.items() if required_chars.issubset(chars)]
+        matching_fonts = [
+            path
+            for path, chars in self.font_support_table.items()
+            if required_chars.issubset(chars) and path not in self.handwriting_fonts
+        ]
         if matching_fonts:
             return random.choice(matching_fonts)
 

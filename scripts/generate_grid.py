@@ -1,193 +1,205 @@
 #!/usr/bin/env python3
 # Copyright (C) 2021-2026, Felix Dittrich.
-#
-# Render an example grid (detection pages + recognition crops) like the one in
-# the README. Words, fonts and backgrounds are downloaded/cached on first run.
-#
-#   python make_examples_grid.py                      # -> docs/examples_grid.png
-#   python make_examples_grid.py -o my_grid.png --seed 7
 
-from __future__ import annotations
+# This program is licensed under the Apache License 2.0.
+# See LICENSE or go to <https://opensource.org/licenses/Apache-2.0> for full license details.
+
+"""Render the README example image from two prepared recipe builds.
+
+    python -m generator.recipes.detection prepare --languages en,de,pl,ar,ru,hi,ja,he --out /tmp/det
+    python -m generator.recipes.recognition prepare --languages multilingual --out /tmp/rec --num-train 300000
+    python scripts/generate_grid.py --det /tmp/det --rec /tmp/rec -o docs/examples.jpg
+
+Two rows of detection pages (one layout and language each), then recognition crops in
+many scripts, each with its exact label.
+"""
 
 import argparse
-import os
 import random
+from argparse import Namespace
+from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from generator.components import GenerationConfig, PageGenerator, TextImageGenerator
-from generator.components.background_downloader import BackgroundDownloader
-from generator.components.corpus_downloader import CorpusDownloader
+from generator.components.config import GenerationConfig
+from generator.dataset_generator import SyntheticDatasetGenerator
+from generator.recipes import detection
+from generator.recipes.fonts import ManifestFontSelector
+from generator.recipes.languages import script_of
+from generator.recipes.recognition import CropWorker, _read_tsv
 
-# (layout, languages, seed, vertical_prob) - one detection page per layout;
-# Arabic id_card shows RTL, the Japanese page shows fully vertical typesetting.
-DETECTION = [
-    ("paragraph", ["en", "de"], 3, 0.0),
-    ("newspaper", ["en", "de"], 2, 1.0),
-    ("form", ["en", "de"], 7, 0.0),
-    ("id_card", ["ar"], 4, 0.0),
-    ("vertical", ["ja"], 11, 0.0),
+# (language, layout, caption) - two rows of four.
+PAGES = [
+    ("en", "paragraph", "Report · English"),
+    ("de", "receipt", "Receipt · German"),
+    ("pl", "form", "Form with handwriting · Polish"),
+    ("ar", "id_card", "ID card · Arabic"),
+    ("ru", "newspaper", "Newspaper · Russian"),
+    ("hi", "table", "Table · Hindi"),
+    ("ja", "vertical", "Vertical · Japanese"),
+    ("he", "paragraph", "Letter · Hebrew"),
 ]
-DETECTION_CAPTIONS = ["paragraph", "newspaper (+ banner)", "form", "id_card (RTL)", "vertical (JA)"]
-
-# (languages, seed) - recognition crops across scripts/fonts/colours.
-RECOGNITION = [
-    (["en"], 1),
-    (["de"], 2),
-    (["fr"], 3),
-    (["ru"], 4),
-    (["ar"], 5),
-    (["hi"], 6),
-    (["el"], 7),
-    (["en"], 8),
-    (["de"], 9),
-    (["es"], 10),
-    (["th"], 11),
-    (["en"], 12),
-]
-
-CACHE = dict(
-    corpus_cache_dir="/tmp/synth_corpus", font_cache_dir="/tmp/synth_fonts", background_cache_dir="/tmp/synth_bg"
-)
+# (script group, language) for the crop grid.
+CROPS = [
+    ("LATIN", "de"), ("LATIN", "vi"), ("LATIN", "pl"), ("LATIN", "es"), ("LATIN", "tr"), ("CYRILLIC", "ru"),
+    ("CYRILLIC", "uk"), ("GREEK", "el"), ("ARABIC", "ar"), ("ARABIC", "fa"), ("ARABIC", "ur"), ("HEBREW", "he"),
+    ("DEVANAGARI", "hi"), ("BENGALI", "bn"), ("GURMUKHI", "pa"), ("GUJARATI", "gu"), ("TAMIL", "ta"),
+    ("TELUGU", "te"), ("KANNADA", "kn"), ("MALAYALAM", "ml"), ("SINHALA", "si"), ("THAI", "th"), ("LAO", "lo"),
+    ("KHMER", "km"), ("MYANMAR", "my"), ("GEORGIAN", "ka"), ("ARMENIAN", "hy"), ("ETHIOPIC", "am"),
+]  # fmt: skip
+WIDTH, MARGIN, GAP, RADIUS = 2400, 40, 22, 14
+PAGE_H = 440
+CROP_H, CELL_H, COLS = 46, 104, 7
+BG, CARD, INK, MUTED, LABEL = (236, 239, 243), (255, 255, 255), (32, 36, 46), (104, 112, 128), (196, 44, 44)
 
 
-def _font(size: int):
-    for path in (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/Library/Fonts/Arial Bold.ttf",
-    ):
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
+def _group(text: str) -> str:
+    return next((script_of(c) for c in text if c.isalpha()), "NUMBERS")
+
+
+def detection_pages(det_out: Path, bg_dir: str | None, seed: int) -> list[tuple[Image.Image, str]]:
+    """One page per entry of ``PAGES``, rendered exactly like the detection recipe."""
+    args = Namespace(out=str(det_out), density="low", workers=1, bg_dir=bg_dir, png=False, offline=False)
+    cfg = detection._config(args)
+    cfg.detection.partial_page_prob = 0.0  # show each layout in full
+    SyntheticDatasetGenerator(cfg).resolve_backgrounds()
+    pools, nums, _ = detection._load_meta(det_out / "meta")
+    worker = detection.PageWorker(cfg, str(det_out / "meta" / "fonts"), detection.MAX_LONG_EDGE, 1000)
+    pages = []
+    for i, (lang, layout, caption) in enumerate(PAGES):
+        if lang not in pools:
             continue
-    return ImageFont.load_default()
+        cfg.detection.layout = layout
+        for attempt in range(4):
+            random.seed(seed + 31 * i + attempt)
+            np.random.seed(seed + 31 * i + attempt)
+            _, words = next(detection.page_plan(1, seed + i + attempt, pools, nums, {lang: 1.0}))
+            result = worker.page(lang, words)
+            if result:
+                pages.append((result[0], caption))
+                break
+    return pages
 
 
-def resolve_backgrounds():
-    """Download the curated background set once and return its directory (or None).
-
-    ``auto_download_backgrounds`` only fires inside the full dataset generator, so
-    when rendering pages directly we trigger the download ourselves and pass the
-    resulting directory as ``bg_image_dir``.
-    """
-    downloader = BackgroundDownloader(cache_dir=CACHE["background_cache_dir"], enabled=True)
-    paths = downloader.download_all()
-    if not paths:
-        print("No backgrounds downloaded - falling back to generated/blank backgrounds.")
-        return None
-    print(f"Using {len(paths)} downloaded backgrounds from {CACHE['background_cache_dir']}")
-    return CACHE["background_cache_dir"]
-
-
-def detection_page(corpus, languages, layout, seed, vertical_prob=0.0, bg_dir=None, w=620, h=860):
-    """Render one detection page (PIL image) for a given layout."""
-    words = corpus.build_vocabulary(languages, words_per_language=12000)
-    cfg = GenerationConfig.flat(
-        task="detection",
-        languages=languages,
-        det_layout=layout,
-        det_vertical_prob=vertical_prob,
-        det_rotation_prob=0.0,
-        det_page_width_range=(w, w),
-        det_page_height_range=(h, h),
-        bg_image_dir=bg_dir,  # use the downloaded backgrounds
-        det_plain_background_prob=0.0 if bg_dir else 0.4,  # show them off in the demo
-        auto_download_backgrounds=False,  # already resolved above
-        **CACHE,
-    )
+def recognition_crops(rec_out: Path, bg_dir: str | None, seed: int) -> list[tuple[Image.Image, str]]:
+    """One crop per entry of ``CROPS``, drawn from the prepared label pool."""
+    rows = _read_tsv(rec_out / "meta" / "train_labels.tsv")
+    rng = random.Random(seed)
+    pool: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for lang, text in rng.sample(rows, min(len(rows), 400_000)):
+        if 4 <= len(text) <= 13:
+            pool[(_group(text), lang)].append(text)
+    cfg = GenerationConfig.flat(task="recognition", output_dir=str(rec_out), bg_image_dir=bg_dir)
+    SyntheticDatasetGenerator(cfg).resolve_backgrounds()
     random.seed(seed)
     np.random.seed(seed)
-    page, _ = PageGenerator(cfg).generate_page(random.choices(words, k=600))
-    return page
+    worker = CropWorker(cfg, str(rec_out / "meta" / "fonts"))
+    tmp = rec_out / "preview" / "_grid_crop.png"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    crops = []
+    for group, lang in CROPS:
+        for text in pool.get((group, lang), [])[:20]:
+            if worker.render((lang, text), str(tmp)) is not None:
+                crops.append((Image.open(tmp).convert("RGB"), text))
+                break
+    return crops
 
 
-def recognition_crop(corpus, languages, seed, bg_dir=None):
-    """Render one recognition word crop (PIL image)."""
-    words = corpus.build_vocabulary(languages, words_per_language=6000)
-    gen = TextImageGenerator(
-        GenerationConfig.flat(
-            task="recognition",
-            languages=languages,
-            auto_download_fonts=True,
-            auto_download_backgrounds=False,
-            bg_image_dir=bg_dir,
-            **CACHE,
-        )
-    )
-    random.seed(seed * 13)
-    np.random.seed(seed * 13)
-    for _ in range(30):  # skip the rare blank render
-        crop = gen.generate_image(random.choice(words))
-        if crop is not None and crop.width > 20:
-            return crop.convert("RGB")
-    return Image.new("RGB", (60, 24), (255, 255, 255))
+def _card(sheet: Image.Image, box: tuple[int, int, int, int]) -> None:
+    """A white rounded card with a soft shadow."""
+    x0, y0, x1, y1 = box
+    shadow = Image.new("L", sheet.size, 0)
+    ImageDraw.Draw(shadow).rounded_rectangle((x0 + 2, y0 + 5, x1 + 2, y1 + 5), RADIUS, fill=70)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(8))
+    sheet.paste(Image.new("RGB", sheet.size, (190, 196, 206)), (0, 0), shadow)
+    ImageDraw.Draw(sheet).rounded_rectangle(box, RADIUS, fill=CARD)
 
 
-def build_grid(out_path: str, seed: int = 0):
-    """Render the full example grid and save it to ``out_path``."""
-    corpus = CorpusDownloader(cache_dir=CACHE["corpus_cache_dir"])
-    random.seed(seed)
-    bg_dir = resolve_backgrounds()
+def compose(pages, crops, ui_font: str, selector: ManifestFontSelector) -> Image.Image:
+    """Headings, two rows of pages and the crop grid on one sheet."""
+    title = ImageFont.truetype(ui_font, 34)
+    small = ImageFont.truetype(ui_font, 19)
+    inner = WIDTH - 2 * MARGIN
+    layout = []
+    for row in (pages[:4], pages[4:8]):
+        if not row:
+            continue
+        scaled = [
+            (p.resize((max(1, int(p.width * PAGE_H / p.height)), PAGE_H), Image.Resampling.LANCZOS), c) for p, c in row
+        ]
+        total = sum(p.width for p, _ in scaled) + GAP * 2 * (len(scaled) - 1)
+        fit = min(1.35, inner / total)  # fill the row width
+        scaled = [(p.resize((int(p.width * fit), int(p.height * fit)), Image.Resampling.LANCZOS), c) for p, c in scaled]
+        layout.append(scaled)
 
-    # --- detection row (uniform height) ---
-    th = 360
-    pages = [
-        detection_page(corpus, langs, layout, s, vertical_prob=vp, bg_dir=bg_dir) for layout, langs, s, vp in DETECTION
-    ]
-    pages = [p.resize((int(p.width * th / p.height), th)) for p in pages]
+    crop_rows = (len(crops) + COLS - 1) // COLS
+    height = MARGIN + 58 + sum(r[0][0].height + 46 + GAP for r in layout)
+    height += 70 + crop_rows * (CELL_H + GAP) + MARGIN
+    sheet = Image.new("RGB", (WIDTH, height), BG)
 
-    # --- recognition crops ---
-    crops = [recognition_crop(corpus, langs, s, bg_dir=bg_dir) for langs, s in RECOGNITION]
+    def heading(y: int, text: str, sub: str) -> None:
+        draw = ImageDraw.Draw(sheet)
+        draw.text((MARGIN, y), text, fill=INK, font=title)
+        draw.text((MARGIN + draw.textlength(text, font=title) + 18, y + 12), sub, fill=MUTED, font=small)
 
-    pad, cap = 16, 24
-    det_w = sum(p.width for p in pages) + pad * (len(pages) + 1)
-    cols, rows = 4, 3
-    cell_w = (det_w - pad * (cols + 1)) // cols
-    cell_h = 66
-    rec_h = rows * (cell_h + pad) + pad + cap
-    canvas = Image.new("RGB", (det_w, cap + th + pad * 2 + rec_h + 24), (250, 250, 250))
-    draw = ImageDraw.Draw(canvas)
-    font = _font(15)
+    y = MARGIN
+    heading(y, "Text detection", "pages with a polygon for every word")
+    y += 58
+    for row in layout:
+        row_w = sum(p.width for p, _ in row) + GAP * 2 * (len(row) - 1)
+        x = MARGIN + (inner - row_w) // 2
+        for page, caption in row:
+            _card(sheet, (x - 10, y - 10, x + page.width + 10, y + page.height + 38))
+            sheet.paste(page, (x, y))
+            ImageDraw.Draw(sheet).text((x + 2, y + page.height + 8), caption, fill=MUTED, font=small)
+            x += page.width + 2 * GAP
+        y += row[0][0].height + 46 + GAP
 
-    draw.text(
-        (pad, 5),
-        "Detection - full synthetic pages, horizontal and vertical (every word is boxed in the labels)",
-        fill=(35, 35, 35),
-        font=font,
-    )
-    x, y = pad, cap
-    for page, caption in zip(pages, DETECTION_CAPTIONS):
-        canvas.paste(page, (x, y))
-        draw.rectangle([x, y, x + page.width, y + page.height], outline=(205, 205, 205))
-        draw.text((x + 4, y + page.height + 3), caption, fill=(95, 95, 95), font=font)
-        x += page.width + pad
+    y += 12
+    heading(y, "Text recognition", "word crops in 25 scripts, each with its exact label")
+    y += 58
+    cell_w = (inner - GAP * (COLS - 1)) // COLS
+    for i, (crop, text) in enumerate(crops):
+        cx = MARGIN + (i % COLS) * (cell_w + GAP)
+        cy = y + (i // COLS) * (CELL_H + GAP)
+        _card(sheet, (cx, cy, cx + cell_w, cy + CELL_H))
+        draw = ImageDraw.Draw(sheet)
+        im = crop.resize((max(1, int(crop.width * CROP_H / crop.height)), CROP_H), Image.Resampling.LANCZOS)
+        if im.width > cell_w - 20:
+            im = im.resize((cell_w - 20, max(1, int(im.height * (cell_w - 20) / im.width))), Image.Resampling.LANCZOS)
+        sheet.paste(im, (cx + (cell_w - im.width) // 2, cy + 12 + (CROP_H - im.height) // 2))
+        path = selector.get_font_for_text(text)
+        font = ImageFont.truetype(path, 19) if path else small
+        tw = draw.textlength(text, font=font)
+        draw.text((cx + (cell_w - tw) / 2, cy + CROP_H + 24), text, fill=LABEL, font=font)
+    return sheet
 
-    ry = cap + th + pad * 2 + 12
-    draw.text(
-        (pad, ry - cap + 2),
-        "Recognition - word crops across scripts, fonts, colours and degradations",
-        fill=(35, 35, 35),
-        font=font,
-    )
-    for i, crop in enumerate(crops):
-        cx = pad + (i % cols) * (cell_w + pad)
-        cy = ry + (i // cols) * (cell_h + pad)
-        tile = Image.new("RGB", (cell_w, cell_h), (255, 255, 255))
-        scale = min((cell_w - 14) / crop.width, (cell_h - 14) / crop.height, 2.2)
-        crop = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))))
-        tile.paste(crop, ((cell_w - crop.width) // 2, (cell_h - crop.height) // 2))
-        canvas.paste(tile, (cx, cy))
-        draw.rectangle([cx, cy, cx + cell_w, cy + cell_h], outline=(222, 222, 222))
 
-    canvas.save(out_path)
-    print(f"Saved {out_path}  ({canvas.width}x{canvas.height})")
+def main() -> None:
+    """Command line entry point."""
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--det", required=True, help="prepared detection build (generator.recipes.detection prepare)")
+    p.add_argument("--rec", required=True, help="prepared recognition build (generator.recipes.recognition prepare)")
+    p.add_argument("--bg-dir", default=None, help="background images (default: the curated download)")
+    p.add_argument("--ui-font", default=None, help="font for headings and captions (default: Inter from --rec)")
+    p.add_argument("-o", "--output", default="docs/examples.jpg")
+    p.add_argument("--seed", type=int, default=3)
+    args = p.parse_args()
+    rec = Path(args.rec)
+    candidates = sorted(rec.glob("meta/fonts/*Inter_500.ttf")) + sorted(rec.glob("meta/fonts/*Noto_Sans_500.ttf"))
+    ui_font = args.ui_font or (str(candidates[0]) if candidates else None)
+    if ui_font is None:
+        p.error("no Inter / Noto Sans face in the recognition build - pass --ui-font")
+    pages = detection_pages(Path(args.det), args.bg_dir, args.seed)
+    crops = recognition_crops(rec, args.bg_dir, args.seed)
+    selector = ManifestFontSelector(rec / "meta" / "fonts", handwriting=False)
+    sheet = compose(pages, crops, ui_font, selector)
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(args.output, quality=88, optimize=True)
+    print(args.output, sheet.size, f"{len(pages)} pages, {len(crops)} crops")
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Render an example grid (detection pages + recognition crops).")
-    ap.add_argument("-o", "--out", default="docs/examples_grid_x.png", help="output PNG path")
-    ap.add_argument("--seed", type=int, default=0)
-    args = ap.parse_args()
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    build_grid(args.out, seed=args.seed)
+    main()

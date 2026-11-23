@@ -155,7 +155,7 @@ wandb/
 generator/version.py
 
 # Recipe caches, fonts and built datasets (python -m generator.recipes.*)
-.recipe_cache/
+.recipe_cache/**
 .corpus_cache_eu/
 /fonts_v1/
 /fonts_v1.zip

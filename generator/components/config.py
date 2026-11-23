@@ -274,6 +274,10 @@ class DetectionConfig:
         newspaper_columns_range / newspaper_font_size_range /
             newspaper_line_spacing_range: newspaper density controls.
         max_blocks: safety cap on paragraph blocks per page.
+        partial_page_prob / partial_page_fill_range: probability that a paragraph,
+            newspaper or table page ends part-way down (the last page of a letter or
+            report), and the share of the content height it then uses. Filling every
+            page to the bottom margin teaches a detector that text never stops.
         heading_prob: probability a block starts as a larger heading.
         plain_background_prob: probability of a clean generated paper background
             (texture photos may carry their own unlabelled text).
@@ -329,6 +333,8 @@ class DetectionConfig:
     newspaper_font_size_range: tuple[int, int] = (9, 15)
     newspaper_line_spacing_range: tuple[float, float] = (1.05, 1.2)
     max_blocks: int = 48
+    partial_page_prob: float = 0.25
+    partial_page_fill_range: tuple[float, float] = (0.3, 0.8)
     heading_prob: float = 0.3
     plain_background_prob: float = 0.3
     rotation_prob: float = 0.05

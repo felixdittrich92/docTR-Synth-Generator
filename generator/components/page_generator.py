@@ -57,18 +57,21 @@ class PageGenerator:
 
     Args:
         config (GenerationConfig): Configuration (see the ``det_*`` fields).
+        font_selector (FontSelector | None): use this selector instead of building one from the config.
     """
 
-    def __init__(self, config: GenerationConfig):
+    def __init__(self, config: GenerationConfig, font_selector: FontSelector | None = None):
         self.config = config
-        self.font_selector = FontSelector(
+        # A caller may supply its own selector (e.g. a vetted, per-language font set).
+        self.font_selector = font_selector or FontSelector(
             config.resources.font_dir,
             auto_download=config.resources.auto_download_fonts,
             font_cache_dir=config.resources.font_cache_dir,
             download_timeout=config.resources.font_download_timeout,
             verify_shaping=config.resources.verify_shaping,
         )
-        self.text_renderer = TextRenderer(config)
+        # Pages are degraded as a whole (capture, blur, noise, JPEG), never word by word.
+        self.text_renderer = TextRenderer(config, word_augmentations=False)
         self.background_manager = BackgroundManager(
             config.resources.bg_image_dir,
             cache_size=config.resources.bg_cache_size,
@@ -123,6 +126,10 @@ class PageGenerator:
         # Carve vertical strips out of the content area *before* the body is laid
         # out, so vertical and horizontal text can never overlap.
         area, vertical_regions = self._plan_vertical_regions(area, layout)
+        if layout in ("paragraph", "newspaper", "table") and random.random() < cfg.detection.partial_page_prob:
+            # The last page of a letter or report: the body stops part-way down.
+            lo, hi = cfg.detection.partial_page_fill_range
+            area = (area[0], area[1], area[2], area[1] + int((area[3] - area[1]) * random.uniform(lo, hi)))
 
         if layout == "table":
             self._layout_table(page, area, take_word, rtl, polygons)
@@ -304,14 +311,33 @@ class PageGenerator:
 
         return decide_text_style(self.config, sample, bold_width=bold_width, outline_width=0, palette=self._palette)
 
+    # Baseline position within a line, as a share of the font size.
+    _BASELINE = 0.8
+
     def _render_word(self, word: str, font_size: int, bold_width: int, role: str = "body"):
+        """Render ``word``; ``info["ink_top"]`` holds where its ink starts below the line top.
+
+        Crops are cut tight to the ink, so "ace" starts lower than "Ace". Pasting
+        every crop at the line's top would lift lower-case words off the baseline;
+        :meth:`_emit` adds this offset so a line shares one baseline.
+        """
         font_path = self._font_for(word, role)
         if not font_path:
             return None
-        return self.text_renderer.render_coverage(word, font_path, font_size, bold_width)
+        coverage = self.text_renderer.render_coverage(word, font_path, font_size, bold_width)
+        try:
+            # Ink top relative to the *baseline*, so faces with different ascenders
+            # (a heading face, a per-word "ransom" page) still share the line's baseline.
+            top = self.text_renderer._get_font(font_path, font_size).getbbox(word, anchor="ls")[1]
+        except Exception:
+            top = -font_size * self._BASELINE
+        ss = self.text_renderer.supersample
+        baseline = font_size * self._BASELINE
+        coverage.info["ink_top"] = baseline + top - bold_width / ss - self.config.recognition.padding
+        return coverage
 
     def _emit(self, page, coverage, style, paste_x: float, y: float, polygons: list[Polygon]) -> bool:
-        px, py = int(paste_x), int(y)
+        px, py = int(paste_x), int(round(y + coverage.info.get("ink_top", 0)))
         page.alpha_composite(recolor_coverage(coverage, style), (px, py))
         bbox = coverage.getchannel("A").getbbox()
         if bbox:
@@ -365,7 +391,9 @@ class PageGenerator:
         line_height = max(font_size + 1, int(font_size * random.uniform(*line_spacing)))
         space = max(2, int(font_size * 0.33))
         y, lines = by0, 0
+        gap = max(1, int(font_size * 0.06))
         while y + line_height <= by1 and lines < max_lines:
+            first_box = len(polygons)
             indent = first_indent if lines == 0 else 0
             cursor = (bx1 - indent) if rtl else (bx0 + indent)
             line_has_word = False
@@ -385,7 +413,17 @@ class PageGenerator:
                 cursor = (paste_x - space) if rtl else (paste_x + ww + space)
             if not line_has_word:
                 break  # nothing fits this box width
-            y += line_height
+            # Leading is a multiple of the font size, but scripts with tall stacks
+            # (Devanagari headline + marks above and below, Thai, Vietnamese) reach
+            # further than Latin. Advance far enough that the next line's ink, which
+            # starts about as far below its top as this line's did, clears this one.
+            placed = polygons[first_box:]
+            if placed:
+                ink_top = min(pt[1] for poly in placed for pt in poly) - y
+                ink_bottom = max(pt[1] for poly in placed for pt in poly)
+                y = max(y + line_height, int(ink_bottom + gap - ink_top))
+            else:
+                y += line_height
             lines += 1
         return y
 
@@ -697,7 +735,9 @@ class PageGenerator:
         if coverage is None:
             return None
         rotation = Image.Transpose.ROTATE_90 if mode == "ccw" else Image.Transpose.ROTATE_270
-        return coverage.transpose(rotation)
+        rotated = coverage.transpose(rotation)
+        rotated.info.pop("ink_top", None)  # a rotated word's baseline is a column, not a line
+        return rotated
 
     def _fill_column(
         self,
@@ -1566,8 +1606,13 @@ class PageGenerator:
         my = cy1 - pad - int(mfs * 2.4)
         mstyle = self._style_at(page, cx0 + pad, my, avail, mfs * 2, 0)
         for _ in range(2):
-            mrz = "".join(random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<<<<") for _ in range(n_chars))
-            self._place_token(page, mrz, cx0 + pad, my, mfs, mstyle, 0, polygons)
+            # 0.62 em is a guess at the face's advance; a wider face would run the
+            # line past the card edge, so shorten it until it fits.
+            for _attempt in range(6):
+                mrz = "".join(random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<<<<") for _ in range(n_chars))
+                if self._place_token(page, mrz, cx0 + pad, my, mfs, mstyle, 0, polygons, max_width=avail):
+                    break
+                n_chars = max(8, int(n_chars * 0.88))
             my += int(mfs * 1.15)
 
     @staticmethod

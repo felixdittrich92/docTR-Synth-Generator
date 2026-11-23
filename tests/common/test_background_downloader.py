@@ -52,3 +52,16 @@ def test_absolute_url_entries_pass_through(monkeypatch):
     # Manifest fetch fails -> falls back to the default file list (resolved to repo URLs).
     urls = bd._resolve_entries()
     assert len(urls) > 0
+
+
+def test_retired_backgrounds_leave_existing_caches(tmp_path):
+    from PIL import Image
+
+    from generator.components.background_downloader import _DEFAULT_FILES, _RETIRED_FILES, BackgroundDownloader
+
+    assert not _RETIRED_FILES & set(_DEFAULT_FILES)
+    for name in ("noisy_1.png", "paper_3.jpg"):
+        Image.new("RGB", (8, 8)).save(tmp_path / name)
+    paths = BackgroundDownloader(str(tmp_path)).download_all()
+    assert [p.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] for p in paths] == ["paper_3.jpg"]
+    assert not (tmp_path / "noisy_1.png").exists()  # newspaper clippings: real, unlabelled text

@@ -48,11 +48,13 @@ class TextImageGenerator:
 
     Args:
         config (GenerationConfig): Configuration for text image generation
+        font_selector (FontSelector | None): use this selector instead of building one from the config
     """
 
-    def __init__(self, config: GenerationConfig):
+    def __init__(self, config: GenerationConfig, font_selector: FontSelector | None = None):
         self.config = config
-        self.font_selector = FontSelector(
+        # A caller may supply its own selector (e.g. a vetted, per-language font set).
+        self.font_selector = font_selector or FontSelector(
             config.resources.font_dir,
             auto_download=config.resources.auto_download_fonts,
             font_cache_dir=config.resources.font_cache_dir,

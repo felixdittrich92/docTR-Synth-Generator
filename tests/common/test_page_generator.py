@@ -37,6 +37,7 @@ def _cfg(tiny_font_dir, **kw):
         supersample=2,
         capture_prob=0.0,
         det_bleed_through_prob=0.0,
+        det_partial_page_prob=0.0,
         # Pixel mode: these tests assert exact page sizes. Media mode is
         # exercised separately below.
         media_enabled=False,
@@ -133,13 +134,29 @@ def test_is_rtl_detection():
 def test_rtl_layout_places_words_from_the_right(tiny_font_dir, monkeypatch):
     # Force RTL so the latin tiny font can still exercise the right-to-left path:
     # in reading order the first word should sit further right than the second.
-    pg = PageGenerator(_cfg(tiny_font_dir, det_max_blocks=2))
+    # Pinned to a plain paragraph: a mixed layout may pick a form, table or vertical
+    # page, where reading order is not one right-to-left line.
+    pg = PageGenerator(
+        _cfg(tiny_font_dir, det_max_blocks=2, det_layout="paragraph", det_heading_prob=0.0, det_vertical_prob=0.0)
+    )
     monkeypatch.setattr(pg, "_is_rtl", lambda words: True)
     _, polygons = pg.generate_page(["aa", "bb", "cc", "dd", "ee", "ff"])
     assert len(polygons) >= 2
     x_first = polygons[0][0][0]
     x_second = polygons[1][0][0]
     assert x_first > x_second
+
+
+def test_partial_page_stops_part_way_down(tiny_font_dir):
+    words = [f"w{i}" for i in range(400)]
+    cfg = dict(det_layout="paragraph", det_partial_page_prob=1.0, det_partial_page_fill_range=(0.4, 0.4))
+    page, polygons = PageGenerator(_cfg(tiny_font_dir, det_max_blocks=40, det_furniture_prob=0.0, **cfg)).generate_page(
+        words
+    )
+    lowest = max(pt[1] for poly in polygons for pt in poly)
+    assert polygons and lowest < page.height * 0.6  # the body ends well above the bottom margin
+    _, full = PageGenerator(_cfg(tiny_font_dir, det_layout="paragraph", det_max_blocks=40)).generate_page(words)
+    assert max(pt[1] for poly in full for pt in poly) > lowest
 
 
 def test_choose_layout_respects_explicit(tiny_font_dir):
@@ -980,3 +997,85 @@ def test_scrim_never_paints_outside_its_region(tiny_font_dir):
     # Painted columns must stay within the strip plus a small line-height pad.
     assert xs.min() >= 250 - 16, f"scrim reached x={xs.min()}, left of the strip"
     assert xs.max() <= 310 + 16, f"scrim reached x={xs.max()}, right of the strip"
+
+
+def _baseline_font(path):
+    """'a' is x-height, 'A' cap height, 'T' reaches far above and below - all on one baseline."""
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+    def box(y0, y1):
+        pen = TTGlyphPen(None)
+        pen.moveTo((60, y0))
+        pen.lineTo((60, y1))
+        pen.lineTo((540, y1))
+        pen.lineTo((540, y0))
+        pen.closePath()
+        return pen.glyph()
+
+    glyphs = {
+        ".notdef": box(0, 700),
+        "a": box(0, 500),
+        "A": box(0, 700),
+        "T": box(-500, 1300),
+        "space": TTGlyphPen(None).glyph(),
+    }
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder(list(glyphs))
+    fb.setupGlyf(glyphs)
+    fb.setupCharacterMap({ord("a"): "a", ord("A"): "A", ord("T"): "T", ord(" "): "space"})
+    fb.setupHorizontalMetrics(dict.fromkeys(glyphs, (600, 60)))
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "Baseline", "styleName": "Regular"})
+    fb.setupOS2()
+    fb.setupPost()
+    fb.save(path)
+
+
+def _paragraph_lines(tmp_path, words):
+    _baseline_font(str(tmp_path / "Baseline.ttf"))
+    cfg = _cfg(str(tmp_path), det_layout="paragraph", det_heading_prob=0.0, det_vertical_prob=0.0, det_max_blocks=1)
+    cfg.realism.rotation_prob = cfg.realism.perspective_prob = 0.0
+    pg = PageGenerator(cfg)
+    pg.config.detection.punctuation_prob = 0.0
+    _, polygons = pg.generate_page(words)
+    lines, current, last_x = [], [], -1
+    for poly in polygons:
+        x = min(pt[0] for pt in poly)
+        if x < last_x and current:
+            lines.append(current)
+            current = []
+        current.append(poly)
+        last_x = x
+    return [line for line in lines + [current] if line]
+
+
+def test_words_of_a_line_share_one_baseline(tmp_path):
+    lines = _paragraph_lines(tmp_path, ["aa", "AA", "aaa", "AaA"])
+    assert len(lines) >= 2
+    for line in lines:
+        bottoms = [max(pt[1] for pt in poly) for poly in line]
+        assert max(bottoms) - min(bottoms) <= 2  # lower-case words used to float above the baseline
+
+
+def test_tall_lines_never_overlap(tmp_path):
+    lines = _paragraph_lines(tmp_path, ["TT", "aT", "TaT"])
+    assert len(lines) >= 2
+    for upper, lower in zip(lines, lines[1:]):
+        assert max(pt[1] for p in upper for pt in p) < min(pt[1] for p in lower for pt in p)
+
+
+def test_id_card_mrz_stays_on_the_card(tiny_font_dir, monkeypatch):
+    pg = PageGenerator(_cfg(tiny_font_dir, det_layout="id_card"))
+    # A face twice as wide as the MRZ sizing assumes.
+    original = pg.text_renderer.render_coverage
+
+    def wide(text, font_path, font_size, bold_width=0):
+        img = original(text, font_path, font_size, bold_width)
+        return img.resize((img.width * 2, img.height)) if "<" in text else img
+
+    monkeypatch.setattr(pg.text_renderer, "render_coverage", wide)
+    page, polygons = pg.generate_page(WORDS)
+    mrz = [p for p in polygons if max(pt[0] for pt in p) - min(pt[0] for pt in p) > page.width * 0.3]
+    assert all(max(pt[0] for pt in p) < page.width for p in polygons)
+    assert mrz  # still drawn, just shorter

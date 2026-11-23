@@ -29,7 +29,6 @@ _DEFAULT_FILES: list[str] = [
     "line_paper_2.jpg",
     "magazin_white.png",
     "noise.jpg",
-    "noisy_1.png",
     "old_paper.jpg",
     "old_paper_2.jpg",
     "paper_3.jpg",
@@ -43,6 +42,10 @@ _DEFAULT_FILES: list[str] = [
 ]
 
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+# Dropped from the default set: a collage of newspaper clippings. Its real text would
+# sit unlabelled under every detection page and recognition crop drawn on it, so it is
+# removed from existing caches as well.
+_RETIRED_FILES = {"noisy_1.png"}
 _DOWNLOAD_LOCK = threading.Lock()
 
 
@@ -119,6 +122,10 @@ class BackgroundDownloader:
         """Download all background images, returning the local paths obtained."""
         if not self.enabled:
             return []
+        for name in _RETIRED_FILES:
+            retired = os.path.join(self.cache_dir, name)
+            if os.path.exists(retired):
+                os.remove(retired)
         # Reuse anything already cached without re-downloading.
         cached = [
             os.path.join(self.cache_dir, f) for f in os.listdir(self.cache_dir) if f.lower().endswith(_IMAGE_EXTS)

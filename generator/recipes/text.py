@@ -27,6 +27,7 @@ __all__ = [
     "digit_filler",
     "combining_filler",
     "cycle_sample",
+    "symbol_token",
 ]
 
 # -----------------------------------------------------------------------------
@@ -176,6 +177,9 @@ def native_number_tokens(native: dict[str, str], n: int, rng: random.Random) -> 
     return out
 
 
+_NEVER_ALONE = set("\\°^_`~()[]{}")
+
+
 def numeric_tokens(
     lang: str, n: int, charset: set[str], rng: random.Random, native_prob: float = 0.4, allow_spaces: bool = False
 ) -> list[str]:
@@ -188,6 +192,12 @@ def numeric_tokens(
     for t in generate_numeric_tokens(int(n * 2) + 200, seed=rng.randint(0, 2**31)):
         if " " in t and not allow_spaces:
             continue
+        if len(t) == 1 and not t.isalnum():
+            # A lone '|', '&' or '+' is a real word box (separators, "Smith & Co"), but
+            # at the generator's rate it would outnumber the same symbol in context;
+            # a lone backslash, degree sign or bracket hardly ever stands on its own.
+            if t in _NEVER_ALONE or rng.random() < 0.6:
+                continue
         if rng.random() < 0.35:
             for s in "€$£¥":
                 t = t.replace(s, rng.choice(currency))
@@ -234,3 +244,95 @@ def cycle_sample(words: list[str], k: int, rng: random.Random) -> list[str]:
         rng.shuffle(batch)
         out.extend(batch[: k - len(out)])
     return out
+
+
+# -----------------------------------------------------------------------------
+# Symbols in context
+# -----------------------------------------------------------------------------
+
+
+def _num(rng: random.Random, lo: int = 1, hi: int = 4) -> str:
+    return "".join(rng.choice("0123456789") for _ in range(rng.randint(lo, hi)))
+
+
+def _caps(rng: random.Random, n: int) -> str:
+    return "".join(rng.choice("ABCDEFGHIJKLMNOPRSTUVW") for _ in range(n))
+
+
+# How each ASCII symbol is really written in documents. Every entry is a list of
+# builders taking (word, rng); a symbol missing here is attached to a word or number.
+_SYMBOL_TEMPLATES: dict[str, list] = {
+    "&": [
+        lambda w, r: f"{_caps(r, 1)}&{_caps(r, 1)}",
+        lambda w, r: f"{_caps(r, 2)}&{_caps(r, 1)}",
+        lambda w, r: "&",
+        lambda w, r: f"{w}&{w[:3]}",
+        lambda w, r: f"&{w}",
+    ],
+    "\\": [
+        lambda w, r: f"C:\\{w}",
+        lambda w, r: f"{w}\\{_num(r)}",
+        lambda w, r: f"\\{w}",
+        lambda w, r: f"{_num(r)}\\{_num(r, 1, 2)}",
+    ],
+    "|": [
+        lambda w, r: "|",
+        lambda w, r: f"{w}|",
+        lambda w, r: f"|{w}",
+        lambda w, r: f"{_num(r)}|{_num(r)}",
+        lambda w, r: f"|{_num(r)}|",
+    ],
+    "_": [
+        lambda w, r: f"{w}_{w[:4]}",
+        lambda w, r: f"{w}_{_num(r)}",
+        lambda w, r: f"_{w}",
+        lambda w, r: "____",
+        lambda w, r: f"{w}_",
+    ],
+    "^": [
+        lambda w, r: f"x^{_num(r, 1, 1)}",
+        lambda w, r: f"{_num(r, 1, 2)}^{_num(r, 1, 2)}",
+        lambda w, r: f"{w}^",
+        lambda w, r: f"^{_num(r)}",
+    ],
+    "°": [
+        lambda w, r: f"{_num(r, 1, 3)}°",
+        lambda w, r: f"{_num(r, 1, 2)}°C",
+        lambda w, r: f"{_num(r, 1, 3)}°F",
+        lambda w, r: f"{_num(r, 1, 2)},{_num(r, 1, 1)}°",
+    ],
+    "@": [lambda w, r: f"@{w}", lambda w, r: f"{w}@{w[:4]}.com", lambda w, r: f"{w[:3]}@{w}.de"],
+    "#": [lambda w, r: f"#{_num(r)}", lambda w, r: f"#{w}", lambda w, r: f"Nr.#{_num(r)}"],
+    "~": [lambda w, r: f"~{_num(r)}", lambda w, r: f"~/{w}", lambda w, r: f"{w}~"],
+    "*": [lambda w, r: f"{w}*", lambda w, r: f"*{_num(r)}", lambda w, r: "***", lambda w, r: f"*{w}"],
+    "=": [lambda w, r: f"{w}={_num(r)}", lambda w, r: f"x={_num(r)}", lambda w, r: "=", lambda w, r: f"={_num(r)}"],
+    "+": [lambda w, r: f"+{_num(r)}", lambda w, r: f"{_num(r)}+{_num(r)}", lambda w, r: f"{w}+"],
+    "<": [lambda w, r: f"<{_num(r)}", lambda w, r: f"<{w}>", lambda w, r: f"<{w}"],
+    ">": [lambda w, r: f">{_num(r)}", lambda w, r: "->", lambda w, r: f"{w}>"],
+    "[": [lambda w, r: f"[{_num(r, 1, 2)}]", lambda w, r: f"[{w}]", lambda w, r: f"[{w}"],
+    "]": [lambda w, r: f"[{_num(r, 1, 2)}]", lambda w, r: f"[{w}]", lambda w, r: f"{w}]"],
+    "{": [lambda w, r: f"{{{w}}}", lambda w, r: f"{{{_num(r)}}}", lambda w, r: f"{{{w}"],
+    "}": [lambda w, r: f"{{{w}}}", lambda w, r: f"{{{_num(r)}}}", lambda w, r: f"{w}}}"],
+    "`": [lambda w, r: f"`{w}`", lambda w, r: f"{w}`"],
+    "/": [lambda w, r: f"{_num(r)}/{_num(r)}", lambda w, r: f"{w}/{w[:4]}", lambda w, r: "km/h"],
+    "%": [lambda w, r: f"{_num(r, 1, 3)}%", lambda w, r: f"{_num(r, 1, 2)},{_num(r, 1, 1)}%"],
+}
+
+
+def symbol_token(char: str, word: str, rng: random.Random) -> str:
+    r"""A token that uses ``char`` the way documents do (``R&D``, ``25°C``, ``C:\\Users``)."""
+    builders = _SYMBOL_TEMPLATES.get(char)
+    if builders:
+        return rng.choice(builders)(word, rng)
+    r = rng.random()
+    if unicodedata.category(char)[0] == "S":  # currency, maths, units: next to numbers
+        if r < 0.5:
+            return f"{_num(rng)}{char}"
+        if r < 0.8:
+            return f"{char}{_num(rng)}"
+        return char if r < 0.9 else word + char
+    if r < 0.6:
+        return word + char  # trailing punctuation (word. word۔ word؛)
+    if r < 0.85:
+        return char + word
+    return char

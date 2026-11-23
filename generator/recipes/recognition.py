@@ -67,6 +67,7 @@ from .text import (
     native_number_tokens,
     numeric_tokens,
     random_case,
+    symbol_token,
 )
 
 __all__ = ["prepare", "render", "verify", "topup", "main"]
@@ -295,6 +296,29 @@ def prepare(args) -> None:
     def accept(token: str) -> bool:
         return selector.renders(token, rng=rng)
 
+    def symbols_in_context(pool: list[tuple[str, str]], words_by_lang: dict[str, list[str]], floor: int):
+        """Tokens that carry under-represented punctuation and symbols the way documents do."""
+        counts = Counter(c for _, t in pool for c in t)
+        out: list[tuple[str, str]] = []
+        for c in vocab:
+            if unicodedata.category(c)[0] not in "PS" or counts[c] >= floor:
+                continue
+            hosts = [lang for lang, ws in words_by_lang.items() if ws and c in charsets[lang]]
+            need, tries = floor - counts[c], 0
+            while hosts and need > 0 and tries < floor * 6:
+                tries += 1
+                lang = rng.choice(hosts)
+                token = symbol_token(c, rng.choice(words_by_lang[lang]), rng)
+                if (
+                    token
+                    and len(token) <= MAX_LEN
+                    and set(token) <= charsets[lang]
+                    and selector.candidates(token, lang)
+                ):
+                    out.append((lang, token))
+                    need -= token.count(c)
+        return out
+
     def complete(pool: list[tuple[str, str]], floor: int, seed: int) -> tuple[list[tuple[str, str]], int]:
         """Top every vocab character up to ``floor`` occurrences, with renderable tokens only."""
         texts = [t for _, t in pool]
@@ -311,9 +335,12 @@ def prepare(args) -> None:
         return pool, n_added
 
     print("Sampling pools and completing vocab coverage ...")
-    train, n_tr = complete(build(train_words, q_train, n_num_train, args.min_char_count), args.min_char_count, SEED)
+    train = build(train_words, q_train, n_num_train, args.min_char_count)
+    train += symbols_in_context(train, train_words, args.min_char_count)
+    train, n_tr = complete(train, args.min_char_count, SEED)
     train_texts = {t for _, t in train}
     val = [(lang, t) for lang, t in build(val_words, q_val, n_num_val, args.min_char_count_val) if t not in train_texts]
+    val += symbols_in_context(val, val_words, args.min_char_count_val)
     val, n_va = complete(val, args.min_char_count_val, SEED + 1)
     rng.shuffle(train)
     rng.shuffle(val)
@@ -388,9 +415,8 @@ class CropWorker(Worker):
     """Renders one recognition crop with a face of the sample's language."""
 
     def __init__(self, cfg: GenerationConfig, font_dir: str):
-        self.gen = TextImageGenerator(cfg)
         self.selector = ManifestFontSelector(font_dir, handwriting=False)
-        self.gen.font_selector = self.selector
+        self.gen = TextImageGenerator(cfg, font_selector=self.selector)
         self.save = ("JPEG", {"quality": cfg.core.output_jpeg_quality}) if cfg.core.output_jpeg else ("PNG", {})
 
     def render(self, payload, path):
@@ -409,7 +435,6 @@ def _config(args) -> GenerationConfig:
         task="recognition",
         output_dir=str(args.out),
         num_workers=args.workers,
-        auto_download_fonts=True,  # unused: the manifest selector replaces font resolution
         bg_image_dir=args.bg_dir,
         output_jpeg=not args.png,
         output_jpeg_quality=JPEG_QUALITY,

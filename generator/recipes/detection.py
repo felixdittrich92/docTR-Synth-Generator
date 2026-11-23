@@ -53,7 +53,7 @@ from .corpus import THAI_MOJIBAKE, Corpus
 from .fonts import ManifestFontSelector, assign_fonts, collect_fonts, require_harfbuzz, scan_fonts, write_font_dir
 from .languages import LANGUAGES, allowed_scripts, letter_scripts, resolve_languages
 from .render import Progress, Worker, make_pool, render_part
-from .text import attach_punct, numeric_tokens, random_case
+from .text import attach_punct, numeric_tokens, random_case, symbol_token
 
 __all__ = ["prepare", "render", "main"]
 
@@ -67,9 +67,16 @@ JPEG_QUALITY = 85
 # ~1600 on the long edge only cost disk.
 DELIVERY_LONG_EDGE = (1024.0, 1600.0)
 MAX_LONG_EDGE = 1600
-# A 1600 px page carrying more boxes than this has ~3 px glyphs once resized to 1024:
-# it teaches nothing and costs ~45 bytes per box in labels.json. Such pages are dropped.
-MAX_BOXES_PER_PAGE = 1200
+# docTR trains detection at --input_size 1024 (long edge). Body text on a real A4 scan
+# is ~10-12 px tall there and footnotes ~6 px; below ~5 px print is no longer legible.
+# A page is re-rolled when more than MAX_TINY_SHARE of its words fall below MIN_TEXT_PX,
+# or when it carries more than MAX_BOXES_PER_PAGE words (a wall of fine print, which
+# also costs ~45 bytes per box in labels.json).
+TRAIN_INPUT_SIZE = 1024
+MIN_TEXT_PX = 5.0
+MAX_TINY_SHARE = 0.03
+MAX_BOXES_PER_PAGE = 1000
+PAGE_ATTEMPTS = 4
 # Typography presets: (body points, fine-print prob, newspaper px, max blocks, table rows,
 # newspaper columns). docTR's DetectionDataset holds every box in RAM, so this is the main
 # lever on labels.json size as well as on legibility after the resize to 1024 px.
@@ -209,6 +216,11 @@ def prepare(args) -> None:
         key = LANGUAGES[lang][0]
         target = {c for c in VOCABS[key] if not c.isspace() and selector.candidates(c, lang)}
         words = [w for w in pools[lang] if selector.candidates(w, lang)]
+        counts = Counter(c for w in words for c in w)
+        for c in sorted(target):  # punctuation and symbols in the contexts documents use
+            if unicodedata.category(c)[0] in "PS" and counts[c] < COVERAGE_MIN and words:
+                tokens = (symbol_token(c, rng.choice(words), rng) for _ in range(COVERAGE_MIN * 4))
+                words += [t for t in tokens if set(t) <= target and selector.candidates(t, lang)][:COVERAGE_MIN]
         words, n_cov, _ = augment_words_for_coverage(
             words, target, min_count=COVERAGE_MIN, seed=SEED, accept=lambda t: selector.renders(t, rng=rng)
         )
@@ -256,18 +268,51 @@ def prepare(args) -> None:
 # =============================================================================
 
 
+def text_heights_at_input(
+    polygons: np.ndarray, size: tuple[int, int], input_size: int = TRAIN_INPUT_SIZE
+) -> np.ndarray:
+    """Text height of each word once docTR resizes the page to ``input_size`` (long edge).
+
+    Horizontal words are measured by their height. Tall boxes are either vertical
+    words or single narrow glyphs ('l', '1') whose width says nothing about type
+    size, so they only count when the page has hardly any horizontal words (a
+    vertical CJK page), measured by their width.
+    """
+    scale = input_size / max(size)
+    xs, ys = polygons[:, :, 0], polygons[:, :, 1]
+    w, h = (xs.max(1) - xs.min(1)) * scale, (ys.max(1) - ys.min(1)) * scale
+    horizontal = w >= 0.6 * h
+    if horizontal.sum() >= 0.3 * len(h):
+        return h[horizontal]
+    return w[h >= 3 * w]
+
+
+def legible_at_input_size(polygons: np.ndarray, size: tuple[int, int]) -> bool:
+    """Whether no more than ``MAX_TINY_SHARE`` of the words fall below ``MIN_TEXT_PX``."""
+    heights = text_heights_at_input(polygons, size)
+    return not len(heights) or float((heights < MIN_TEXT_PX).mean()) <= MAX_TINY_SHARE
+
+
 class PageWorker(Worker):
     """Renders one page in faces of its language."""
 
     def __init__(self, cfg: GenerationConfig, font_dir: str, max_long_edge: int, max_boxes: int):
-        self.gen = PageGenerator(cfg)
-        self.selector = ManifestFontSelector(font_dir, handwriting=True, cache_dir=cfg.resources.font_cache_dir)
-        self.gen.font_selector = self.selector
+        self.selector = ManifestFontSelector(
+            font_dir, handwriting=cfg.resources.auto_download_fonts, cache_dir=cfg.resources.font_cache_dir
+        )
+        self.gen = PageGenerator(cfg, font_selector=self.selector)
         self.max_long_edge, self.max_boxes = max_long_edge, max_boxes
         self.save = ("JPEG", {"quality": cfg.core.output_jpeg_quality}) if cfg.core.output_jpeg else ("PNG", {})
 
     def page(self, lang: str, words: list[str]) -> tuple[Image.Image, np.ndarray] | None:
-        """Render a page; ``None`` when it has no boxes or is too dense to be useful."""
+        """Render a page whose text stays legible at docTR's input size (``None`` if none did)."""
+        for _ in range(PAGE_ATTEMPTS):
+            result = self._page_once(lang, words)
+            if result is not None and legible_at_input_size(result[1], result[0].size):
+                return result
+        return None
+
+    def _page_once(self, lang: str, words: list[str]) -> tuple[Image.Image, np.ndarray] | None:
         det = self.gen.config.detection
         cjk = lang in CJK_VERTICAL
         det.layout_weights = LAYOUT_CJK_VERTICAL if cjk else LAYOUT_DEFAULT
@@ -336,7 +381,7 @@ def _config(args) -> GenerationConfig:
         task="detection",
         output_dir=str(args.out),
         num_workers=args.workers,
-        auto_download_fonts=True,  # handwriting faces only; printed text uses the vetted faces
+        auto_download_fonts=not getattr(args, "offline", False),  # handwriting faces only
         bg_image_dir=args.bg_dir,
         output_jpeg=not args.png,
         output_jpeg_quality=JPEG_QUALITY,

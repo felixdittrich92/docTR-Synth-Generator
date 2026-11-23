@@ -230,3 +230,58 @@ def test_recognition_recipe_end_to_end(tmp_path, temp_image_dir):
     labels = json.loads((shards[0] / "labels.json").read_text(encoding="utf-8"))
     assert all((shards[0] / "images" / name).exists() for name in labels)
     assert all(unicodedata.is_normalized("NFC", t) for t in labels.values())
+
+
+def test_symbol_tokens_use_documents_contexts():
+    from generator.recipes.text import symbol_token
+
+    rng = random.Random(0)
+    amp = [symbol_token("&", "Haus", rng) for _ in range(60)]
+    assert any(len(t) > 1 for t in amp)  # 'R&D', 'Haus&Hau' ... not only a lone '&'
+    degrees = [symbol_token("°", "Haus", rng) for _ in range(30)]
+    assert all(t[0].isdigit() for t in degrees)  # '25°C', '12°'
+    assert symbol_token("‰", "Haus", random.Random(1))  # unknown symbols still get a token
+
+
+def test_tiny_text_pages_are_rejected():
+    import numpy as np
+
+    from generator.recipes.detection import legible_at_input_size, text_heights_at_input
+
+    def boxes(height, n, width=60):
+        return np.array([[[0, 0], [width, 0], [width, height], [0, height]]] * n, dtype=float)
+
+    assert legible_at_input_size(boxes(30, 100), (2048, 2048))  # 15 px at 1024: body text
+    assert not legible_at_input_size(boxes(8, 100), (2048, 2048))  # 4 px at 1024: unreadable
+    # narrow single glyphs ('l', '1') do not count as tiny vertical text
+    mixed = np.concatenate([boxes(30, 100), boxes(30, 10, width=4)])
+    assert len(text_heights_at_input(mixed, (2048, 2048))) == 100
+
+
+@needs_shaping
+def test_detection_recipe_end_to_end(tmp_path, temp_image_dir):
+    from generator.recipes import detection
+
+    fonts = tmp_path / "fonts_src"
+    fonts.mkdir()
+    for name in ("A", "B", "C"):
+        build_font(str(fonts / f"{name}.ttf"), VOCABS["english"] + " ")
+    corpus = tmp_path / "cache" / "corpora"
+    corpus.mkdir(parents=True)
+    words = [f"word{i}" for i in range(400)] + ["alpha", "beta", "gamma", "delta"] * 20
+    (corpus / "frek_en.txt").write_text("\n".join(words), encoding="utf-8")
+    args = Namespace(
+        out=str(tmp_path / "det"), languages="en", num_train=3, num_val=1, part_size=2, workers=1, density="low",
+        font_src=str(fonts), cache=str(tmp_path / "cache"), bg_dir=temp_image_dir, offline=True, png=False,
+    )  # fmt: skip
+    detection.prepare(args)
+    detection.render(args)
+    for split, n in (("train", 3), ("val", 1)):
+        labels = json.loads((tmp_path / "det" / split / "labels.json").read_text(encoding="utf-8"))
+        assert len(labels) == n
+        for name, entry in labels.items():
+            image = Image.open(tmp_path / "det" / split / "images" / name)
+            assert [image.height, image.width] == entry["img_dimensions"]
+            assert entry["polygons"] and all(
+                0 <= x <= image.width and 0 <= y <= image.height for poly in entry["polygons"] for x, y in poly
+            )

@@ -29,6 +29,13 @@ A tool to generate synthetic OCR datasets - made for docTR
   *and* vertical text (margin notes, banners, spines, CJK columns).
 - **Fast & memory-bounded**: font objects and decoded backgrounds are cached, with
   a configurable cache size.
+- **Labels that match the pixels**: every word is shaped with HarfBuzz before a
+  font is used for it - a face that would draw a tofu box, a dotted circle or an
+  empty glyph is never chosen - and every recognition crop must stay legible along
+  its whole length.
+- **Large-scale recipes**: resumable 10M+ crop recognition builds with a
+  *guaranteed-complete* vocab, and multilingual detection builds over ~100
+  languages (see [Large-scale datasets](#large-scale-datasets-recipes)).
 
 ## Quickstart
 
@@ -582,6 +589,60 @@ read naturally. For example `languages=["ar"]`, `["he"]`, `["zh"]` or `["hi"]`.
 > transform. Pinned `det_receipt_*` ranges are treated as the more specific pin
 > and still win for the receipt layout.
 
+## Large-scale datasets (recipes)
+
+`generate_dataset()` is built for up to a few hundred thousand samples. For full
+training sets the `generator.recipes` package adds resumable, sharded builds on top
+of the same renderer:
+
+```bash
+# Recognition: 10M crops, Latin + Cyrillic + Greek (preset "european")
+python -m generator.recipes.recognition prepare --languages european --out european_rec
+python -m generator.recipes.recognition preview --out european_rec   # contact sheet per script
+python -m generator.recipes.recognition render  --out european_rec   # resumable
+python -m generator.recipes.recognition verify  --out european_rec   # every vocab char rendered?
+
+# Every non-CJK docTR vocab (96 languages, 24 scripts, ~3,000 characters)
+python -m generator.recipes.recognition all --languages multilingual --out multilingual_rec --num-train 25000000
+
+# Detection: pages in ~100 languages, merged into one docTR folder per split
+python -m generator.recipes.detection prepare --languages all --out multilingual_det
+python -m generator.recipes.detection render  --out multilingual_det --density low
+```
+
+`--languages` takes a preset (`european`, `multilingual`, `all`) or ISO codes
+(`de,fr,ru`). The output is what docTR's training references expect:
+`--train_path OUT/train --val_path OUT/val` (recognition train data is split into
+`shard_XXXX/` folders; `OUT/meta/vocab.txt` is the model vocab to register in docTR).
+
+**Vocab coverage is guaranteed, not hoped for:**
+
+1. The model vocab is the union of the languages' docTR vocabs, restricted to what
+   the vetted fonts can actually draw. Characters no face inks are reported in
+   `meta/vocab_dropped.json` instead of becoming dead classes.
+2. Every font is scanned with HarfBuzz once (cached in `.recipe_cache/`): which
+   characters it *inks* (not just maps) and which complex scripts it has shaping
+   rules for. A face serves a language only if it draws every letter that occurs in
+   that language's text, so no typeface is ever seen "dropping" a diacritic.
+3. Every vocab character is placed in at least `--min-char-count` train labels
+   (default 1000) and `--min-char-count-val` val labels - by repeating real words
+   that contain it where possible, else by script-valid synthetic tokens that
+   HarfBuzz confirms shape without a dotted circle.
+4. Each crop is rendered with a face of its own language that HarfBuzz confirms,
+   and must pass the legibility gate.
+5. `verify` recounts the characters of the labels that were *actually written*;
+   `topup` renders exactly the missing ones if anything is short.
+
+Corpus repairs are applied before any of this: mojibake in the frequency lists
+(Icelandic, Estonian, Romanian, Hungarian, Thai), Indic vowel signs stored in visual
+order (`िकया` -> `किया`), Serbian/Uzbek script conversion, Catalan `l·l`, Uzbek `oʻ`.
+Words that render identically in another script (Russian `се` vs Latin `ce`) are
+dropped, so a label is always a function of the image, and val shares no word with
+train. Pillow must be built with libraqm, and `prepare` refuses to run otherwise.
+
+Rendering appends every finished chunk to a progress log, so an interrupted run
+resumes where it stopped and a shard only becomes visible once it is complete.
+
 ## Plug into docTR training (on-the-fly, in-RAM)
 
 You can skip writing a dataset to disk entirely and feed freshly synthesised
@@ -710,6 +771,14 @@ synthetic glyphs. The pipeline applies, all configurable:
 - Bleed-through from the reverse of the sheet, deliberately left out of the
   ground truth (`det_bleed_through_prob`).
 - Optional JPEG output (`output_jpeg=True`) to match real document captures.
+- A shaping check per word (`verify_shaping`, on by default): HarfBuzz - the engine
+  behind Pillow's raqm layout - shapes the text first, and a face that would draw
+  `.notdef`, insert a dotted circle for a broken cluster or show an empty glyph is
+  skipped. Without it, a font whose cmap *maps* a character but draws nothing yields
+  a crop whose label names a character the image does not contain.
+- A legibility gate for recognition crops (`min_local_contrast`): the finished crop
+  is measured window by window along the word, and background and ink are re-drawn
+  until no part of it sits camouflaged on a dark band or busy patch of paper.
 
 ## Performance & memory
 

@@ -11,7 +11,6 @@ import pytest
 from generator.components.config import GenerationConfig
 from generator.components.generator import TextImageGenerator
 from generator.components.page_generator import PageGenerator
-from generator.components.vocabs import VOCABS
 from generator.doctr_dataset import (
     CLASS_NAME,
     Sample,
@@ -230,30 +229,6 @@ def test_corpus_languages_for_vocab_combines_and_handles_scriptless():
     assert _corpus_languages_for_vocab("odia") == ["or"]
     german = _corpus_languages_for_vocab("german")
     assert "de" in german and "en" in german  # english fits within the german vocab
-
-
-def test_latex_formulas_are_valid_and_in_vocab():
-    from generator.components.latex_generator import generate_latex_formulas, is_valid_latex
-
-    formulas = generate_latex_formulas(40, seed=1)
-    assert len(formulas) >= 30  # most attempts yield distinct valid formulas
-    vocab = set(VOCABS["latex"])
-    for f in formulas:
-        assert is_valid_latex(f)  # mathtext can render it
-        assert set(f) <= vocab  # label stays within VOCABS["latex"]
-
-
-def test_build_latex_recognition_datasets(monkeypatch):
-    from generator.components import GenerationConfig
-    from generator.components.vocabs import VOCABS
-    from generator.doctr_dataset import build_recognition_datasets
-
-    cfg = GenerationConfig.flat(task="recognition", num_images=20, val_percent=0.25, corpus_seed=5)
-    train, val = build_recognition_datasets(cfg, vocab="latex")  # routed to the latex builder
-    assert len(train) == 15 and len(val) == 5  # sizes from num_images + val_percent
-    assert set(train.formulas).isdisjoint(val.formulas)  # disjoint train/val formulas
-    img, label = train[0]
-    assert img.shape[0] == 3 and set(label) <= set(VOCABS["latex"])
 
 
 def test_vocab_restriction_falls_back_to_the_languages_vocabs(tiny_font_dir):

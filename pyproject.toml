@@ -32,7 +32,6 @@ dependencies = [
     "fonttools>=4.50.0,<5.0.0",
     "numpy>=2.0.0,<3.0.0",
     "Pillow>=11.0.0",
-    "matplotlib>=3.7.0,<4.0.0",
     # HarfBuzz shaping check: a word is only rendered with a face that draws it
     # without tofu, dotted circles or empty glyphs (see components/shaping.py)
     "uharfbuzz>=0.39.0",
@@ -98,7 +97,6 @@ module = [
     "uharfbuzz.*",
     "numpy.*",
     "PIL.*",
-    "matplotlib.*",
 ]
 ignore_missing_imports = true
 

@@ -66,6 +66,7 @@ class PageGenerator:
             auto_download=config.resources.auto_download_fonts,
             font_cache_dir=config.resources.font_cache_dir,
             download_timeout=config.resources.font_download_timeout,
+            verify_shaping=config.resources.verify_shaping,
         )
         self.text_renderer = TextRenderer(config)
         self.background_manager = BackgroundManager(
@@ -239,10 +240,8 @@ class PageGenerator:
                 self._page_fonts["heading"] = self._page_fonts["body"]
 
         pinned = self._page_fonts.get(role)
-        if pinned:
-            supported = self.font_selector.font_support_table.get(pinned)
-            if supported is not None and all(c in supported for c in text if not c.isspace()):
-                return pinned
+        if pinned and self.font_selector.supports(text, pinned):
+            return pinned
 
         resolved = self.font_selector.get_font_for_text(text)
         if resolved and role not in self._page_fonts:
@@ -452,7 +451,7 @@ class PageGenerator:
                 self._place_token(page, page_no, bx1, edge_y, fs, style, 0, polygons, align_right=True)
 
         if random.random() < cfg.logo_prob:  # logo block or barcode: NOT text, NOT labelled
-            self._draw_non_text_mark(page, area, draw)
+            self._draw_non_text_mark(page, area, draw, polygons)
 
         if random.random() < cfg.stamp_prob:  # a stamp IS text and IS labelled
             self._draw_stamp(page, area, take_word, polygons)
@@ -502,15 +501,51 @@ class PageGenerator:
         area = max(1e-6, (px1 - px0) * (py1 - py0))
         return (ox * oy) / area > 0.5
 
-    def _draw_non_text_mark(self, page, area, draw) -> None:
-        """A logo block or a barcode - high-contrast, structured and *not* text."""
+    @staticmethod
+    def _free_spot(
+        size: tuple[int, int], candidates_x: list[int] | range, candidates_y: list[int] | range, polygons, pad: int = 6
+    ) -> tuple[int, int] | None:
+        """A top-left corner where a ``size`` box overlaps no labelled word, or ``None``.
+
+        Furniture painted over body text hides words whose polygons stay in the
+        ground truth - the detector is then taught to find text that is not
+        visible. Marks therefore only go where the page is empty.
+        """
+        w, h = size
+        boxes = []
+        for poly in polygons:
+            xs = [pt[0] for pt in poly]
+            ys = [pt[1] for pt in poly]
+            boxes.append((min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad))
+        xs_list, ys_list = list(candidates_x), list(candidates_y)
+        if not xs_list or not ys_list:
+            return None
+        for _ in range(40):
+            x, y = random.choice(xs_list), random.choice(ys_list)
+            if not any(x < b[2] and x + w > b[0] and y < b[3] and y + h > b[1] for b in boxes):
+                return x, y
+        return None
+
+    def _draw_non_text_mark(self, page, area, draw, polygons=()) -> None:
+        """A logo block or a barcode - high-contrast, structured and *not* text.
+
+        Drawn only into free space (see :meth:`_free_spot`); skipped when the
+        page has none.
+        """
         bx0, by0, bx1, by1 = area
         width = bx1 - bx0
         if random.random() < 0.5:  # barcode
             bw = int(width * random.uniform(0.25, 0.45))
             bh = int(bw * random.uniform(0.25, 0.4))
-            x = random.randint(bx0, max(bx0, bx1 - bw))
-            y = random.randint(by0, max(by0, by1 - bh))
+            spot = self._free_spot(
+                (bw + 8, bh + 8),
+                range(bx0 - 4, max(bx0 - 3, bx1 - bw - 4)),
+                range(by0 - 4, max(by0 - 3, by1 - bh - 4)),
+                polygons,
+            )
+            if spot is None:
+                return
+            x, y = spot[0] + 4, spot[1] + 4
             draw.rectangle((x - 4, y - 4, x + bw + 4, y + bh + 4), fill=(252, 252, 252))
             cursor = x
             while cursor < x + bw:
@@ -520,8 +555,11 @@ class PageGenerator:
                 cursor += bar_w + random.randint(1, 3)
         else:  # abstract logo mark
             size = int(width * random.uniform(0.08, 0.16))
-            x = random.choice([bx0, bx1 - size])
-            y = by0 - size // 2 if by0 - size // 2 > 2 else by0
+            top = by0 - size // 2 if by0 - size // 2 > 2 else by0
+            spot = self._free_spot((size, size), [bx0, bx1 - size], [top, by1 - size], polygons)
+            if spot is None:
+                return
+            x, y = spot
             color = random.choice([(38, 62, 120), (28, 90, 70), (120, 40, 48), (40, 40, 48)])
             shape = random.random()
             if shape < 0.4:
@@ -889,8 +927,7 @@ class PageGenerator:
             pinned = self._page_fonts["handwriting"]
             if not pinned:
                 return None
-            supported = self.font_selector.font_support_table.get(pinned)
-            if supported is not None and all(c in supported for c in text if not c.isspace()):
+            if self.font_selector.supports(text, pinned):
                 return pinned
         resolved = self.font_selector.get_handwriting_font(text)
         self._page_fonts.setdefault("handwriting", resolved or "")

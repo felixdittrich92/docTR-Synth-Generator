@@ -71,6 +71,10 @@ class ResourceConfig:
             filenames/URLs to use instead of the default set.
         bg_cache_size: number of decoded backgrounds kept in memory.
         bg_max_dimension: backgrounds larger than this are downscaled.
+        verify_shaping: shape every word with HarfBuzz before using a font and
+            reject faces that would draw a tofu box, a dotted circle or an empty
+            glyph - the image then always shows exactly its label. Needs the
+            optional ``uharfbuzz`` package; a no-op without it.
     """
 
     wordlist_path: str | None = None
@@ -85,6 +89,7 @@ class ResourceConfig:
     background_manifest_url: str | None = None
     bg_cache_size: int = 50
     bg_max_dimension: int = 2000
+    verify_shaping: bool = True
 
 
 @dataclass
@@ -181,6 +186,11 @@ class RealismConfig:
         crop_texture_std: how much fine detail a background photo may keep behind
             text. Structure at glyph scale camouflages strokes no matter what ink
             is chosen; 0 disables the compression.
+        min_local_contrast: recognition crops are re-drawn (new background and ink)
+            until every part of the word clears this luminance gap over its local
+            paper, net of the paper's own texture (see
+            :func:`~generator.components.legibility.local_ink_contrast`). An
+            unreadable crop with a label is pure noise for a recogniser. 0 disables.
         min_ink_separation: guaranteed luminance separation between ink and paper
             *after* opacity is applied. Contrast, hue scaling, jitter and opacity
             each look reasonable alone and compound into invisible text.
@@ -207,6 +217,7 @@ class RealismConfig:
     page_contrast_bias: float = 0.45
     min_ink_separation: float = 62.0
     crop_texture_std: float = 10.0
+    min_local_contrast: float = 30.0
     max_contrast: float = 0.95
     invert_prob: float = 0.15
     bold_prob: float = 0.3

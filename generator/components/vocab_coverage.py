@@ -6,6 +6,7 @@
 import random
 import unicodedata
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from functools import lru_cache
 
 from .vocabs import VOCABS
@@ -163,6 +164,11 @@ def _script_of(char: str) -> str:
         name = unicodedata.name(char)
     except ValueError:
         return "COMMON"
+    if name.startswith("MODIFIER LETTER"):
+        # Modifier letters are written inside words of a host script (Uzbek oʻ/gʻ,
+        # Hawaiian ʻokina, Georgian ჼ). Treated as a script of their own they only
+        # ever pair with each other, which yields tokens like "ʻʼʻ".
+        return "GEORGIAN" if "GEORGIAN" in name else "LATIN"
     return name.split(" ", 1)[0]  # the first word of the name is the script/block
 
 
@@ -252,7 +258,9 @@ def _make_token(
     base_letters = [
         c
         for c in (script_base_letters.get(script, []) or _CARRIER.get(script, []))
-        if c not in _PREBASE_VOWELS  # never use a left-reordering vowel as filler
+        # Never scaffold with a left-reordering vowel or a modifier letter: "ʻʼʻ"
+        # is not a word in any orthography.
+        if c not in _PREBASE_VOWELS and unicodedata.category(c) != "Lm"
     ]
     if not base_letters:
         base_letters = _CARRIER.get(script, [])
@@ -288,7 +296,17 @@ def _make_token(
             if not bases:
                 break
             word = rng.choice(bases)
-            positions = [i for i, c in enumerate(word) if unicodedata.category(c).startswith("L")]
+            # After a letter that does not already carry a mark: a second matra
+            # or a mark wedged between a consonant and its virama is a broken
+            # cluster, which the shaper draws with a dotted circle.
+            positions = [
+                i
+                for i, c in enumerate(word)
+                if unicodedata.category(c).startswith("L")
+                and c not in _PREBASE_VOWELS
+                and (i + 1 == len(word) or not _is_mark(word[i + 1]))
+                and (i == 0 or not _is_virama(word[i - 1]))
+            ]
             if positions:
                 i = rng.choice(positions)
                 return (word[: i + 1] + char + word[i + 1 :])[:16]
@@ -316,6 +334,28 @@ def _make_token(
             tail = "".join(rng.choice(base_letters) for _ in range(rng.randint(1, 2)))
             return (char + tail)[:16]
         return ""
+    if unicodedata.category(char) == "Lm":
+        # Modifier letters (Uzbek oʻ, ʼ) follow a letter inside a real word.
+        for _ in range(6):
+            if not bases:
+                break
+            word = rng.choice(bases)
+            positions = [i for i, c in enumerate(word) if c.isalpha() and unicodedata.category(c) != "Lm"]
+            if positions:
+                i = rng.choice(positions)
+                return (word[: i + 1] + char + word[i + 1 :])[:16]
+        if base_letters:
+            return (rng.choice(base_letters) + char + rng.choice(base_letters))[:16]
+        return char  # no host letter at all (e.g. Japanese ー on its own script bucket)
+    if char.isupper() and char.lower() != char:
+        # A capital belongs at the start of a word ("Ổng"), not wedged inside one
+        # ("guichỔo"): replace the first letter of a real word, else lead a scaffold.
+        lower = [w for w in bases if w[:1].isalpha() and w[:1].islower()]
+        if lower and rng.random() < 0.8:
+            word = rng.choice(lower)
+            return (char + word[1:])[:16]
+        rest = [c for c in base_letters if c.islower()] or list(base_letters)
+        return (char + "".join(rng.choice(rest) for _ in range(rng.randint(0, 4))))[:16] if rest else char
     if bases and rng.random() < 0.6:
         word = rng.choice(bases)
         pos = rng.randint(0, len(word))
@@ -332,6 +372,7 @@ def augment_words_for_coverage(
     target_chars: set[str],
     min_count: int = 3,
     seed: int | None = None,
+    accept: Callable[[str], bool] | None = None,
 ) -> tuple[list[str], int, int]:
     """Append synthetic tokens so every target character is well represented.
 
@@ -346,6 +387,9 @@ def augment_words_for_coverage(
             times across the returned list.
         min_count (int): Minimum occurrences required per target character.
         seed (int | None): Seed for reproducible token synthesis.
+        accept (Callable[[str], bool] | None): Optional gate for *synthesised*
+            tokens, e.g. "some font shapes this without a dotted circle". A
+            rejected token is redrawn; attested real words are never gated.
 
     Returns:
         tuple[list[str], int, int]: ``(augmented_words, n_tokens_added,
@@ -414,6 +458,8 @@ def augment_words_for_coverage(
                 token = rng.choice(attested)  # real, attested word - correct combinations
             else:
                 token = _make_token(char, script_words, script_base_letters, rng)
+                if token and accept is not None and not accept(token):
+                    continue  # malformed for this script (or unrenderable): draw another
             if not token:
                 break  # cannot place this character validly (no same-script base letter)
             extra.append(token)

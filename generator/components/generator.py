@@ -13,7 +13,7 @@ from PIL import Image
 from .background_manager import BackgroundManager
 from .config import GenerationConfig
 from .font_selector import FontSelector
-from .legibility import DegradationBudget
+from .legibility import DegradationBudget, local_ink_contrast
 from .text_renderer import TextRenderer, TextStyle
 from .text_styling import (
     apply_final_degradations,
@@ -57,6 +57,7 @@ class TextImageGenerator:
             auto_download=config.resources.auto_download_fonts,
             font_cache_dir=config.resources.font_cache_dir,
             download_timeout=config.resources.font_download_timeout,
+            verify_shaping=config.resources.verify_shaping,
         )
         self.text_renderer = TextRenderer(config)
         self.background_manager = BackgroundManager(
@@ -109,18 +110,32 @@ class TextImageGenerator:
         if not font_path:
             return None
 
-        font_size, bold_width, outline_width = self.text_renderer.sample_style()
+        # Background and ink are re-drawn until the finished crop is readable along
+        # its whole length: a dark band or busy patch of paper under part of the
+        # word makes a label the image no longer supports. A second round re-rolls
+        # size and weight too, since a hairline at 12px may never clear the bar.
+        min_contrast = self.config.realism.min_local_contrast
+        for _ in range(2 if min_contrast > 0 else 1):
+            font_size, bold_width, outline_width = self.text_renderer.sample_style()
+            # Render the glyph once as a black coverage map (single getbbox/draw).
+            coverage = None
+            for _ in range(self.config.core.max_attempts):
+                candidate = self.text_renderer.render_coverage(text, font_path, font_size, bold_width)
+                if self.is_text_visible(candidate):
+                    coverage = candidate
+                    break
+            if coverage is None:
+                continue
+            for _ in range(max(1, self.config.core.max_attempts)):
+                image, alpha = self._compose(text, font_path, font_size, coverage, outline_width, bold_width)
+                if min_contrast <= 0 or local_ink_contrast(image, alpha) >= min_contrast:
+                    return image
+        return None
 
-        # Render the glyph once as a black coverage map (single getbbox/draw).
-        coverage = None
-        for _ in range(self.config.core.max_attempts):
-            candidate = self.text_renderer.render_coverage(text, font_path, font_size, bold_width)
-            if self.is_text_visible(candidate):
-                coverage = candidate
-                break
-        if coverage is None:
-            return None
-
+    def _compose(
+        self, text: str, font_path: str, font_size: int, coverage: Image.Image, outline_width: int, bold_width: int
+    ) -> tuple[Image.Image, Image.Image]:
+        """Background + ink + final degradations for one rendered glyph map."""
         bg_crop = self.background_manager.get_background_crop(coverage.size)
         # Calm the texture *before* choosing ink, so the decision is made against
         # the background the glyph will actually sit on.
@@ -137,7 +152,8 @@ class TextImageGenerator:
             glyph = self._recolor(coverage, style)
 
         composed = Image.alpha_composite(bg_crop.convert("RGBA"), glyph).convert("RGB")
-        return self._apply_final_degradations(composed, text_height=coverage.height)
+        image = self._apply_final_degradations(composed, text_height=coverage.height)
+        return image, glyph.getchannel("A")
 
     @staticmethod
     def worker_process(task_queue: mp.Queue, result_queue: mp.Queue, config: GenerationConfig, worker_id: int):

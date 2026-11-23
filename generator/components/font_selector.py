@@ -9,6 +9,7 @@ import random
 from fontTools.ttLib import TTFont
 
 from .font_downloader import FontDownloader
+from .shaping import ShapingChecker
 
 __all__ = ["FontSelector"]
 
@@ -30,7 +31,12 @@ class FontSelector:
         font_cache_dir (str | None): Where downloaded fonts are cached. Defaults
             to ``<font_dir>/_downloaded`` (or ``./.font_cache`` when no font_dir).
         download_timeout (int): Per-request timeout for downloads in seconds.
+        verify_shaping (bool): Also shape the text with HarfBuzz and reject a font
+            that would draw a tofu box, a dotted circle or an empty glyph for it
+            (see :class:`ShapingChecker`). A no-op when ``uharfbuzz`` is missing.
     """
+
+    MAX_SHAPING_TRIES = 12
 
     def __init__(
         self,
@@ -38,8 +44,10 @@ class FontSelector:
         auto_download: bool = False,
         font_cache_dir: str | None = None,
         download_timeout: int = 30,
+        verify_shaping: bool = True,
     ):
         self.font_dir = font_dir
+        self.shaping = ShapingChecker(enabled=verify_shaping)
         self.font_support_table: dict[str, set[str]] = {}
         # Handwriting faces live in the same support table (so they can be
         # rendered) but are excluded from ordinary printed-text resolution -
@@ -100,6 +108,23 @@ class FontSelector:
                 supported_chars.update(chr(cp) for cp in cmap.cmap.keys())
         return supported_chars
 
+    def supports(self, text: str, font_path: str) -> bool:
+        """Whether ``font_path`` covers every character of ``text`` and shapes it cleanly."""
+        chars = self.font_support_table.get(font_path)
+        if chars is None or not all(c in chars for c in text if not c.isspace()):
+            return False
+        return self.shaping.ok(text, font_path)
+
+    def _first_clean(self, text: str, candidates: list[str]) -> str | None:
+        """A random candidate that shapes ``text`` cleanly (cmap coverage is already given)."""
+        if not self.shaping.enabled:
+            return random.choice(candidates)
+        # A broken cluster fails in every face, a face-specific gap (an empty
+        # glyph, missing shaping rules) in a few - a dozen tries tells them apart
+        # without shaping a malformed token against hundreds of fonts.
+        order = random.sample(candidates, min(len(candidates), self.MAX_SHAPING_TRIES))
+        return next((path for path in order if self.shaping.ok(text, path)), None)
+
     def get_handwriting_font(self, text: str) -> str | None:
         """Get a handwriting face covering ``text``, or ``None`` if there is none.
 
@@ -113,8 +138,8 @@ class FontSelector:
             for path, chars in self.font_support_table.items()
             if required_chars.issubset(chars) and (path in self.handwriting_fonts or self._looks_handwritten(path))
         ]
-        if local:
-            return random.choice(local)
+        if local and (chosen := self._first_clean(text, local)):
+            return chosen
         if not self.auto_download:
             return None
 
@@ -125,6 +150,8 @@ class FontSelector:
         if downloaded:
             self._register_font(downloaded)
             self.handwriting_fonts.add(downloaded)
+            if not self.shaping.ok(text, downloaded):
+                downloaded = None
         self._text_font_cache[key] = downloaded
         return downloaded
 
@@ -158,7 +185,12 @@ class FontSelector:
             if required_chars.issubset(chars) and path not in self.handwriting_fonts
         ]
         if matching_fonts:
-            return random.choice(matching_fonts)
+            chosen = self._first_clean(text, matching_fonts)
+            if chosen or not self.auto_download:
+                # ``None`` here means every local face that maps these characters
+                # would draw a broken cluster - the text itself is malformed, and
+                # a downloaded font would not shape it any better.
+                return chosen
 
         if not self.auto_download:
             return None
@@ -170,5 +202,7 @@ class FontSelector:
         downloaded = self.downloader.resolve(text)
         if downloaded:
             self._register_font(downloaded)
+            if not self.supports(text, downloaded):
+                downloaded = None
         self._text_font_cache[required_chars] = downloaded
         return downloaded

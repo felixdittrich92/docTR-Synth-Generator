@@ -21,7 +21,49 @@ with a matching cap on motion smear length.
 
 from dataclasses import dataclass
 
-__all__ = ["DegradationBudget"]
+import numpy as np
+from PIL import Image
+
+__all__ = ["DegradationBudget", "local_ink_contrast"]
+
+
+def local_ink_contrast(image: Image.Image, alpha: Image.Image, window: int | None = None) -> float:
+    """Worst ink-vs-paper luminance gap along a word, in a sliding window.
+
+    A whole-crop average hides the failure that actually makes a crop unreadable:
+    *part* of the word sitting on a dark band, a fold or a photographic patch of
+    the background, where ink and paper meet at the same grey. The crop is cut
+    into windows about one glyph height wide; each window compares its glyph core
+    (``alpha >= 192``, or 75% of the peak for hairlines) with its paper (``alpha == 0``), discounted by how busy that
+    paper is. The weakest window is the crop's legibility.
+
+    Args:
+        image: the finished (degraded) crop.
+        alpha: glyph coverage aligned with ``image`` (same size).
+        window: window width in pixels (default: the crop height).
+
+    Returns:
+        The smallest ``|ink - paper| - std(paper)`` over all windows, in 0-255
+        luminance units; ``inf`` when nothing could be measured.
+    """
+    if image.size != alpha.size:
+        return float("inf")
+    lum = np.asarray(image.convert("L"), dtype=np.float32)
+    cov = np.asarray(alpha, dtype=np.uint8)
+    # Thin strokes at small sizes never reach full coverage after anti-aliasing, so
+    # the core is relative to the glyph's own peak.
+    core, paper = cov >= min(192, int(cov.max() * 0.75)), cov == 0
+    width = lum.shape[1]
+    win = max(8, window or lum.shape[0])
+    worst = float("inf")
+    for x0 in range(0, max(1, width - win // 2), max(4, win // 2)):
+        sl = slice(x0, min(width, x0 + win))
+        c, p = core[:, sl], paper[:, sl]
+        if c.sum() < 4 or p.sum() < 8:
+            continue
+        ink, bg = lum[:, sl][c], lum[:, sl][p]
+        worst = min(worst, abs(float(ink.mean()) - float(bg.mean())) - float(bg.std()))
+    return worst
 
 
 @dataclass

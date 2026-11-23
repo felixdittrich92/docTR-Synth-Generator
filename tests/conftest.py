@@ -60,6 +60,37 @@ def _build_tiny_font(path, chars):
     fb.save(path)
 
 
+def build_font(path, inked, empty=""):
+    """A TTF with box glyphs for ``inked`` and outline-less glyphs for ``empty``."""
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+    def box():
+        pen = TTGlyphPen(None)
+        pen.moveTo((80, 0))
+        pen.lineTo((80, 700))
+        pen.lineTo((560, 700))
+        pen.lineTo((560, 0))
+        pen.closePath()
+        return pen.glyph()
+
+    chars = inked + empty
+    fb = FontBuilder(1024, isTTF=True)
+    fb.setupGlyphOrder([".notdef"] + [f"g{i}" for i in range(len(chars))])
+    glyphs = {".notdef": box()}
+    for i, ch in enumerate(chars):
+        glyphs[f"g{i}"] = box() if ch in inked else TTGlyphPen(None).glyph()
+    fb.setupGlyf(glyphs)
+    fb.setupCharacterMap({ord(ch): f"g{i}" for i, ch in enumerate(chars)})
+    fb.setupHorizontalMetrics(dict.fromkeys(glyphs, (640, 80)))
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "Shape", "styleName": "Regular"})
+    fb.setupOS2()
+    fb.setupPost()
+    fb.save(path)
+    return path
+
+
 @pytest.fixture
 def tiny_font():
     """Path to a minimal offline TTF covering ASCII letters, digits and basics."""

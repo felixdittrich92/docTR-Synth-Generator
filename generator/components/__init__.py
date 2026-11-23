@@ -6,6 +6,7 @@ from .config import (
 )
 from .generator import TextImageGenerator, GenerationTask
 from .font_selector import FontSelector
+from .shaping import ShapingChecker
 from .font_downloader import FontDownloader
 from .corpus_downloader import CorpusDownloader, apply_casing_variants, generate_numeric_tokens
 from .text_renderer import TextRenderer, TextStyle
@@ -38,6 +39,7 @@ __all__ = [
     "TextImageGenerator",
     "GenerationTask",
     "FontSelector",
+    "ShapingChecker",
     "FontDownloader",
     "CorpusDownloader",
     "apply_casing_variants",

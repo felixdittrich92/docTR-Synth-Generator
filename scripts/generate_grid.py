@@ -36,7 +36,7 @@ from generator.recipes.recognition import CropWorker, _read_tsv
 # page reaches the camera or scanner, so the image shows the range: colour, grayscale and
 # black-and-white scans and phone photos (bent sheet, fabric or wood under it, colour cast).
 # ``layout=None`` is a text-free hard negative: a crumpled blank sheet on a tablecloth.
-PAGES = [
+PAGES: list[tuple] = [  # (lang, layout, density, capture, caption[, pinned seed])
     ("en", "paragraph", "low", "photo", "Report · English · phone photo"),
     ("de", "receipt", "low", "photo", "Receipt · German · photo"),
     ("ru", "newspaper", "high", "gray", "Dense newspaper · Russian · gray scan"),

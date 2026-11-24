@@ -133,6 +133,13 @@ python -m generator.recipes.detection prepare --languages all --out multilingual
 python -m generator.recipes.detection render  --out multilingual_det
 ```
 
+Or run a ready-made build end to end (resumable; extra recipe options are passed through):
+
+```bash
+python scripts/build_multilingual_detection.py   --out multilingual_det  # ~120k pages, 99 languages (~31 GB)
+python scripts/build_multilingual_recognition.py --out multilingual_rec  # 1.2M crops, 96 languages, no zh/ja/ko
+```
+
 `--languages` takes `european`, `multilingual` (every non-CJK vocab: 96 languages) or `all`, or
 codes such as `de,fr,ru`. `--num-train`, `--num-val` and `--min-char-count` set the size and the
 per-character floor (`--min-char-count-large`, default `50`, for the thousands of CJK ideographs and Hangul

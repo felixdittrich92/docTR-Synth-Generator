@@ -154,5 +154,15 @@ wandb/
 .background_cache
 generator/version.py
 
+# Recipe caches, fonts and built datasets (python -m generator.recipes.*)
+.recipe_cache/**
+.corpus_cache_eu/
+/fonts_v1/
+/fonts_v1.zip
+/european_rec/
+/multilingual_rec/
+/multilingual_det/
+/_legacy_scripts/
+
 # Testfiles
 X_TEST.py

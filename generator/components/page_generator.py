@@ -7,17 +7,31 @@ import hashlib
 import math
 import multiprocessing as mp
 import random
+import unicodedata
 from dataclasses import dataclass, field
 from queue import Empty
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from .background_manager import BackgroundManager
+from .capture import apply_capture, should_capture
 from .config import GenerationConfig
 from .font_selector import FontSelector
-from .text_renderer import TextRenderer
-from .text_styling import apply_final_degradations, build_final_augmentations, decide_text_style, recolor_coverage
+from .legibility import DegradationBudget
+from .media import PageMedia, apply_delivery_resample, media_for_pinned_size, sample_media
+from .scan import MIN_BITONAL_PAGE_TEXT_PX, apply_scan_tone
+from .text_renderer import TextRenderer, TextStyle
+from .text_styling import (
+    PagePalette,
+    apply_final_degradations,
+    build_final_augmentations,
+    decide_text_style,
+    recolor_coverage,
+    sample_page_palette,
+)
+from .textures import apply_creases, fabric, surface, wood
+from .token_sampler import TokenSampler
 
 __all__ = ["PageGenerator", "DetectionTask"]
 
@@ -46,28 +60,49 @@ class PageGenerator:
 
     Args:
         config (GenerationConfig): Configuration (see the ``det_*`` fields).
+        font_selector (FontSelector | None): use this selector instead of building one from the config.
     """
 
-    def __init__(self, config: GenerationConfig):
+    def __init__(self, config: GenerationConfig, font_selector: FontSelector | None = None):
         self.config = config
-        self.font_selector = FontSelector(
+        # A caller may supply its own selector (e.g. a vetted, per-language font set).
+        self.font_selector = font_selector or FontSelector(
             config.resources.font_dir,
             auto_download=config.resources.auto_download_fonts,
             font_cache_dir=config.resources.font_cache_dir,
             download_timeout=config.resources.font_download_timeout,
+            verify_shaping=config.resources.verify_shaping,
         )
-        self.text_renderer = TextRenderer(config)
+        # Pages are degraded as a whole (capture, blur, noise, JPEG), never word by word.
+        self.text_renderer = TextRenderer(config, word_augmentations=False)
         self.background_manager = BackgroundManager(
             config.resources.bg_image_dir,
             cache_size=config.resources.bg_cache_size,
             max_dimension=config.resources.bg_max_dimension,
+            procedural_prob=config.resources.procedural_bg_prob,
         )
         self.final_augs = build_final_augmentations(config)
+        # Per-page style context, reset by every ``generate_page`` call.
+        self._page_fonts: dict[str, str] = {}
+        self._palette: PagePalette | None = None
+        self._rtl_page = False
+        self._min_text_px = float("inf")
+        self._media: PageMedia | None = None
+        self._has_vertical_regions = False
 
     # -- layout -----------------------------------------------------------
 
-    def generate_page(self, words: list[str]) -> tuple[Image.Image, list[Polygon]]:
+    def generate_page(
+        self, words: list[str], negative: bool = False, negative_kind: str | None = None
+    ) -> tuple[Image.Image, list[Polygon]]:
         """Lay out ``words`` on a page and return the page image + word polygons.
+
+        With ``negative=True`` the page carries no labelled text at all - blank or
+        textured paper, an empty form, graphics, a photo, or only the show-through
+        of a page printed on the reverse (``words`` feed that show-through). It goes
+        through the same scan/camera pipeline and comes back with no polygons: a
+        hard negative that teaches a detector what is *not* text. ``negative_kind``
+        pins its kind (see :attr:`NEGATIVE_KINDS`) instead of drawing one.
 
         The layout (paragraph, dense newspaper columns, a label/value form, an
         ID-card with fields or a fully vertical page) is chosen per
@@ -76,9 +111,9 @@ class PageGenerator:
         regions with probability :attr:`DetectionConfig.vertical_prob`.
         """
         cfg = self.config
-        width = random.randint(*cfg.detection.page_width_range)
-        height = random.randint(*cfg.detection.page_height_range)
+        self._begin_page()
         layout = self._choose_layout()
+        width, height = self._page_size(layout)
 
         # Detection ground truth only contains the words we place, so any text in
         # a background photo becomes an unlabelled false negative. Forms/ID-cards
@@ -87,21 +122,41 @@ class PageGenerator:
             page = self._paper_background((width, height)).convert("RGBA")
         else:
             page = self.background_manager.get_page_background((width, height)).convert("RGBA")
+            page = self._calm_background(page)
 
-        if not words:
+        if not words and not negative:
             return page.convert("RGB"), []
 
-        take_word = self._word_supplier(words)
+        take_word = self._word_supplier(words or ["-"])
         rtl = self._is_rtl(words)
+        self._rtl_page = rtl
         margin = max(4, int(min(width, height) * cfg.detection.margin_ratio))
         area = (margin, margin, width - margin, height - margin)
         polygons: list[Polygon] = []
 
+        if negative:
+            page, photographed = self._draw_negative(page, area, take_word if words else None, rtl, negative_kind)
+            return self._finish_page(page, [], width, height, negative=True, photographed=photographed)
+
+        if random.random() < cfg.detection.bleed_through_prob:
+            self._add_bleed_through(page, area, take_word, rtl)
+
         # Carve vertical strips out of the content area *before* the body is laid
         # out, so vertical and horizontal text can never overlap.
         area, vertical_regions = self._plan_vertical_regions(area, layout)
+        self._has_vertical_regions = bool(vertical_regions)
+        if layout in ("paragraph", "newspaper") and random.random() < cfg.detection.picture_prob:
+            area = self._place_picture(page, area, take_word, rtl, polygons, grayscale=layout == "newspaper")
+        if layout in ("paragraph", "newspaper", "table") and random.random() < cfg.detection.partial_page_prob:
+            # The last page of a letter or report: the body stops part-way down.
+            lo, hi = cfg.detection.partial_page_fill_range
+            area = (area[0], area[1], area[2], area[1] + int((area[3] - area[1]) * random.uniform(lo, hi)))
 
-        if layout == "newspaper":
+        if layout == "table":
+            self._layout_table(page, area, take_word, rtl, polygons)
+        elif layout == "receipt":
+            self._layout_receipt(page, area, take_word, rtl, polygons)
+        elif layout == "newspaper":
             self._layout_newspaper(page, area, take_word, rtl, polygons)
         elif layout == "form":
             self._layout_form(page, area, take_word, rtl, polygons)
@@ -115,12 +170,75 @@ class PageGenerator:
         for region in vertical_regions:
             self._draw_vertical_region(page, region, take_word, polygons)
 
+        if layout in ("paragraph", "table", "form", "newspaper") and random.random() < cfg.detection.punch_hole_prob:
+            self._punch_holes(page, margin, polygons)
+
+        if layout not in ("id_card", "receipt") and random.random() < cfg.detection.furniture_prob:
+            self._add_furniture(page, (margin, margin, width - margin, height - margin), take_word, rtl, polygons)
+
+        crease = cfg.detection.crease_prob * (1.75 if layout == "receipt" else 1.0)
+        if random.random() < crease:
+            page = apply_creases(
+                page,
+                crumple=random.uniform(0.3, 1.2) if random.random() < 0.4 else 0.0,
+                strength=random.uniform(1.0, 2.2) if layout == "receipt" else random.uniform(0.7, 1.5),
+            )
+        return self._finish_page(page, polygons, width, height)
+
+    def _finish_page(
+        self,
+        page,
+        polygons: list[Polygon],
+        width: int,
+        height: int,
+        negative: bool = False,
+        photographed: bool = False,
+    ):
+        """Scan or photograph the finished sheet and deliver it (shared by text and negative pages).
+
+        ``photographed`` forces a camera capture on a textured surface - a crumpled
+        blank sheet on a tablecloth is the negative it exists for.
+        """
+        cfg = self.config
         page = page.convert("RGB")
-        if polygons and random.random() < cfg.detection.rotation_prob:
+        # A word running off the edge is legitimate, but its *box* must stop at
+        # the page; anything fully outside is dropped.
+        polygons = self._clip_polygons(polygons, width, height)
+        content = bool(polygons) or negative
+        if negative or self._min_text_px == float("inf"):
+            self._min_text_px = 24.0  # nominal: nothing on the page constrains the budget
+
+        # Pinning the page size pins the *output* size: capture composites the
+        # sheet into a larger frame and the delivery resample resizes it, so
+        # both are skipped rather than silently returning other dimensions.
+        fixed_size = cfg.pins_page_size()
+        if content and not fixed_size and (photographed or should_capture(cfg)):
+            # A photographed capture already carries rotation in its homography,
+            # so the flat page rotation is skipped rather than applied twice.
+            budget = DegradationBudget.for_text_height(self._min_text_px)
+            surface_prob = 0.85 if photographed else None
+            page, polygons = apply_capture(cfg, page, polygons, budget, textured_prob=surface_prob)
+        elif content and not fixed_size and random.random() < cfg.detection.rotation_prob:
+            # ``expand=True`` grows the canvas, so this is skipped too when the
+            # caller pinned the output size.
             angle = random.uniform(*cfg.detection.rotation_range)
             page, polygons = self._rotate(page, polygons, angle)
 
-        page = apply_final_degradations(cfg, page, self.final_augs)
+        delivered = self._min_text_px
+        softened = False
+        if self._media is not None and content and not fixed_size:
+            page, polygons, scale = apply_delivery_resample(cfg, page, polygons, self._media, self._min_text_px)
+            delivered *= scale
+            softened = scale < 0.95
+            polygons = self._clip_polygons(polygons, page.width, page.height)
+
+        # Degradations are budgeted against the *delivered* glyph height, since
+        # that is the resolution the model will actually be trained on.
+        page = apply_final_degradations(
+            cfg, page, self.final_augs, DegradationBudget.for_text_height(delivered, already_softened=softened)
+        )
+        # Colour, grayscale or black-and-white - B&W only if every word survives it.
+        page = apply_scan_tone(cfg, page, polygons, text_height=delivered, min_text_px=MIN_BITONAL_PAGE_TEXT_PX)
         return page, polygons
 
     # -- layout building blocks ------------------------------------------
@@ -129,66 +247,233 @@ class PageGenerator:
         cfg = self.config
         if cfg.detection.layout != "mixed":
             return cfg.detection.layout
+        # Roughly as documents occur in the wild: mostly running text, forms and
+        # tables; ID cards and fully vertical pages are a small share.
         weights = cfg.detection.layout_weights or {
-            "paragraph": 0.34,
-            "newspaper": 0.22,
-            "form": 0.18,
-            "id_card": 0.14,
-            "vertical": 0.12,
+            "paragraph": 0.30,
+            "newspaper": 0.16,
+            "form": 0.16,
+            "id_card": 0.07,
+            "vertical": 0.05,
+            "table": 0.16,
+            "receipt": 0.10,
         }
         names = list(weights)
         return random.choices(names, weights=[weights[n] for n in names], k=1)[0]
 
-    @staticmethod
-    def _word_supplier(words: list[str]):
-        """Return a ``take_word()`` that recycles words so any region fills fully."""
-        shuffled = list(words)
-        n = len(shuffled)
-        state = {"i": 0}
+    def _word_supplier(self, words: list[str]):
+        """Return a ``take_word()`` drawing tokens with real line statistics.
 
-        def take_word() -> str:
-            word = shuffled[state["i"] % n]
-            state["i"] += 1
-            if state["i"] % n == 0:
-                random.shuffle(shuffled)
-            return word
+        Words are recycled indefinitely so any region fills fully, and each draw
+        goes through :class:`TokenSampler` for short-word clustering and attached
+        punctuation. With ``function_word_ratio=0`` and ``punctuation_prob=0``
+        this degrades to the previous uniform recycling.
+        """
+        cfg = self.config.detection
+        sampler = TokenSampler(
+            words,
+            function_word_ratio=cfg.function_word_ratio,
+            function_word_max_len=cfg.function_word_max_len,
+            punctuation_prob=cfg.punctuation_prob,
+        )
+        return sampler.take
 
-        return take_word
+    def _begin_page(self) -> None:
+        """Reset the per-page style context (fonts and ink)."""
+        self._page_fonts = {}
+        self._min_text_px = float("inf")
+        self._media = None
+        self._palette = sample_page_palette(self.config) if random.random() < 0.995 else None
+        if random.random() >= self.config.detection.page_font_coherence:
+            self._page_fonts = {"__free__": ""}  # sentinel: resolve per word
 
-    def _style_at(self, page: Image.Image, x: float, y: float, w: float, h: float, bold_width: int):
+    def _font_for(self, text: str, role: str = "body") -> str | None:
+        """Resolve a font, preferring the face already pinned for ``role``.
+
+        Picking at random per word - the old behaviour - turns a page with a
+        large font set into a ransom note. A page pins one face per role and
+        falls back to per-word resolution only for text the pinned face cannot
+        render (a different script, a missing symbol).
+        """
+        if "__free__" in self._page_fonts:
+            return self.font_selector.get_font_for_text(text)
+
+        if role == "heading" and "heading" not in self._page_fonts:
+            # Headings usually reuse the body face; sometimes they get their own.
+            if random.random() >= self.config.detection.heading_font_prob and "body" in self._page_fonts:
+                self._page_fonts["heading"] = self._page_fonts["body"]
+
+        pinned = self._page_fonts.get(role)
+        if pinned and self.font_selector.supports(text, pinned):
+            return pinned
+
+        resolved = self.font_selector.get_font_for_text(text)
+        if resolved and role not in self._page_fonts:
+            self._page_fonts[role] = resolved
+        return resolved
+
+    def _style_at(
+        self,
+        page: Image.Image,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        bold_width: int,
+        extent: float | None = None,
+    ):
+        """Choose ink for a block, laying a scrim first if the background varies too much.
+
+        One ink is chosen per block from the *mean* of the area under it. That is
+        fine on paper, but a photo background can run bright to dark inside a
+        single block, and then the one ink that suits the average is invisible
+        over the extremes - which is how text ends up unreadable on a texture
+        even though its contrast looks correct on paper.
+
+        Above ``background_scrim_std`` the block gets a translucent paper panel,
+        the same thing a designer does when text has to sit over an image.
+        """
         x0, y0 = int(max(0, x)), int(max(0, y))
-        x1, y1 = int(min(page.width, x + max(20, w))), int(min(page.height, y + max(6, h)))
+        # ``h`` is a line or two, but the block goes on filling downwards. Ink
+        # chosen from the first line alone suits the background there and can be
+        # invisible further down a texture that shades from light to dark, which
+        # is how a page ends up with a quarter of its words swallowed while every
+        # individual style decision looks correct. Judge the whole extent.
+        x1 = int(min(page.width, x + max(20, w)))
+        y1 = int(min(page.height, y + max(6, extent if extent is not None else h)))
         if x1 <= x0 or y1 <= y0:
             x1, y1 = x0 + 1, y0 + 1
-        sample = page.crop((x0, y0, x1, y1)).convert("RGB")
-        return decide_text_style(self.config, sample, bold_width=bold_width, outline_width=0)
 
-    def _render_word(self, word: str, font_size: int, bold_width: int):
-        font_path = self.font_selector.get_font_for_text(word)
+        sample = page.crop((x0, y0, x1, y1)).convert("RGB")
+        threshold = self.config.detection.background_scrim_std
+        if threshold > 0 and np.asarray(sample.convert("L"), dtype=np.float32).std() > threshold:
+            # The pad exists to cover ascenders and descenders, so it scales with
+            # the *line* height. Scaling it with the region height meant a
+            # full-page vertical strip padded by ~230px and painted the scrim
+            # straight over the neighbouring column - which had already been
+            # drawn, since vertical regions render last. It cut words in half:
+            # "back" pale on the scrim, "ed" dark beside it.
+            pad = max(2, min(int(max(6.0, h) * 0.12), 12))
+            box = (
+                max(0, x0 - pad),
+                max(0, y0 - pad),
+                min(page.width, x1 + pad),
+                min(page.height, y1 + pad),
+            )
+            tone = random.randint(226, 250) if random.random() < 0.75 else random.randint(18, 46)
+            alpha = int(255 * random.uniform(0.62, 0.9))
+            scrim = Image.new("RGBA", (box[2] - box[0], box[3] - box[1]), (tone, tone, tone, alpha))
+            page.alpha_composite(scrim, (box[0], box[1]))
+            sample = page.crop((x0, y0, x1, y1)).convert("RGB")
+
+        return decide_text_style(self.config, sample, bold_width=bold_width, outline_width=0, palette=self._palette)
+
+    # Baseline position within a line, as a share of the font size.
+    _BASELINE = 0.8
+
+    def _render_word(self, word: str, font_size: int, bold_width: int, role: str = "body"):
+        """Render ``word``; ``info["ink_top"]`` holds where its ink starts below the line top.
+
+        Crops are cut tight to the ink, so "ace" starts lower than "Ace". Pasting
+        every crop at the line's top would lift lower-case words off the baseline;
+        :meth:`_emit` adds this offset so a line shares one baseline.
+        """
+        font_path = self._font_for(word, role)
         if not font_path:
             return None
-        return self.text_renderer.render_coverage(word, font_path, font_size, bold_width)
+        coverage = self.text_renderer.render_coverage(word, font_path, font_size, bold_width)
+        try:
+            # Ink top relative to the *baseline*, so faces with different ascenders
+            # (a heading face, a per-word "ransom" page) still share the line's baseline.
+            top = self.text_renderer._get_font(font_path, font_size).getbbox(word, anchor="ls")[1]
+        except Exception:
+            top = -font_size * self._BASELINE
+        ss = self.text_renderer.supersample
+        baseline = font_size * self._BASELINE
+        coverage.info["ink_top"] = baseline + top - bold_width / ss - self.config.recognition.padding
+        band = self._text_band(word, font_path, font_size)
+        if band is not None:
+            coverage.info["band"] = (baseline + band[0], baseline + band[1])
+        return coverage
 
-    @staticmethod
-    def _emit(page, coverage, style, paste_x: float, y: float, polygons: list[Polygon]) -> bool:
-        px, py = int(paste_x), int(y)
+    # Cap-height and descender reference per script: annotators box every word of a
+    # line over the same text band, not over its own ink ('ace' would be x-height only).
+    _BAND_REFERENCE = {
+        "LATIN": "Hg", "CYRILLIC": "\u041d\u0443", "GREEK": "\u0397\u03b3", "ARMENIAN": "\u0531\u0584",
+        "GEORGIAN": "\u10d0\u10e4", "HEBREW": "\u05dc\u05da", "ARABIC": "\u0644\u062c",
+        "CJK": "\u56fd", "HIRAGANA": "\u56fd", "KATAKANA": "\u56fd", "HANGUL": "\ud55c",
+        "DEVANAGARI": "\u0915\u093f\u0915\u0941", "BENGALI": "\u0995\u09bf\u0995\u09c1",
+        "THAI": "\u0e1b\u0e39\u0e48",
+    }  # fmt: skip
+    # Annotators leave a little air above and below the text: real word boxes (FUNSD,
+    # CORD) sit ~5% of the font size outside the cap-to-descender band.
+    _BAND_MARGIN = 0.05
+
+    def _text_band(self, word: str, font_path: str, font_size: int) -> tuple[float, float] | None:
+        """(top, bottom) of the script's text band relative to the baseline, or ``None``.
+
+        ``None`` (scripts without a clear cap line, faces lacking the reference
+        glyphs) keeps the label on the word's ink.
+        """
+        script = "LATIN"
+        for ch in word:
+            if ch.isalpha():
+                script = unicodedata.name(ch, "?").split(" ")[0]
+                break
+        ref = self._BAND_REFERENCE.get(script)
+        if ref is None:
+            return None
+        key = (font_path, font_size, script)
+        cache = self.__dict__.setdefault("_band_cache", {})
+        if key not in cache:
+            band = None
+            if self.font_selector.supports(ref, font_path):
+                try:
+                    _, top, _, bottom = self.text_renderer._get_font(font_path, font_size).getbbox(ref, anchor="ls")
+                    margin = self._BAND_MARGIN * font_size
+                    band = (float(top) - margin, float(bottom) + margin)
+                except Exception:
+                    band = None
+            cache[key] = band
+        return cache[key]
+
+    def _emit(self, page, coverage, style, paste_x: float, y: float, polygons: list[Polygon]) -> bool:
+        px, py = int(paste_x), int(round(y + coverage.info.get("ink_top", 0)))
         page.alpha_composite(recolor_coverage(coverage, style), (px, py))
         bbox = coverage.getchannel("A").getbbox()
         if bbox:
             left, top, right, bottom = bbox
+            box_top, box_bottom = py + top, py + bottom
+            band = coverage.info.get("band")
+            if band is not None:
+                # Label the line's text band (cap height to descender), like human
+                # annotations; the ink always stays inside the box.
+                box_top = min(box_top, int(round(y + band[0])))
+                box_bottom = max(box_bottom, int(round(y + band[1])))
             polygons.append([
-                [px + left, py + top],
-                [px + right, py + top],
-                [px + right, py + bottom],
-                [px + left, py + bottom],
+                [px + left, box_top],
+                [px + right, box_top],
+                [px + right, box_bottom],
+                [px + left, box_bottom],
             ])
+            # The smallest glyph on the page sets the degradation budget.
+            self._min_text_px = min(self._min_text_px, float(bottom - top))
             return True
         return False
 
-    def _place_token(self, page, token, x, y, font_size, style, bold_width, polygons, align_right=False):
-        """Place a single pre-built token (e.g. a field label) at (x, y)."""
-        coverage = self._render_word(token, font_size, bold_width)
+    def _place_token(
+        self, page, token, x, y, font_size, style, bold_width, polygons, align_right=False, role="body", max_width=None
+    ):
+        """Place a single pre-built token (e.g. a field label) at (x, y).
+
+        Returns 0 without drawing when the token is wider than ``max_width`` -
+        a right-aligned cell that overflows would silently spill into the
+        neighbouring column and overprint it.
+        """
+        coverage = self._render_word(token, font_size, bold_width, role)
         if coverage is None:
+            return 0
+        if max_width is not None and coverage.width > max_width:
             return 0
         paste_x = x - coverage.width if align_right else x
         self._emit(page, coverage, style, paste_x, y, polygons)
@@ -207,18 +492,21 @@ class PageGenerator:
         max_lines=10**9,
         first_indent=0,
         line_spacing=(1.15, 1.4),
+        role="body",
     ) -> int:
         """Fill a rectangular box with wrapped text; return the y reached."""
         bx0, by0, bx1, by1 = box
         line_height = max(font_size + 1, int(font_size * random.uniform(*line_spacing)))
         space = max(2, int(font_size * 0.33))
         y, lines = by0, 0
+        gap = max(1, int(font_size * 0.06))
         while y + line_height <= by1 and lines < max_lines:
+            first_box = len(polygons)
             indent = first_indent if lines == 0 else 0
             cursor = (bx1 - indent) if rtl else (bx0 + indent)
             line_has_word = False
             for _ in range(400):  # bounded attempts per line
-                coverage = self._render_word(take_word(), font_size, bold_width)
+                coverage = self._render_word(take_word(), font_size, bold_width, role)
                 if coverage is None:
                     continue
                 ww = coverage.width
@@ -233,9 +521,579 @@ class PageGenerator:
                 cursor = (paste_x - space) if rtl else (paste_x + ww + space)
             if not line_has_word:
                 break  # nothing fits this box width
-            y += line_height
+            # Leading is a multiple of the font size, but scripts with tall stacks
+            # (Devanagari headline + marks above and below, Thai, Vietnamese) reach
+            # further than Latin. Advance far enough that the next line's ink, which
+            # starts about as far below its top as this line's did, clears this one.
+            placed = polygons[first_box:]
+            if placed:
+                ink_top = min(pt[1] for poly in placed for pt in poly) - y
+                ink_bottom = max(pt[1] for poly in placed for pt in poly)
+                y = max(y + line_height, int(ink_bottom + gap - ink_top))
+            else:
+                y += line_height
             lines += 1
         return y
+
+    def _add_bleed_through(self, page, area, take_word, rtl) -> None:
+        """Composite mirrored, blurred text as if printed on the reverse side.
+
+        Instantly recognisable on any duplex-printed or thin-stock document, and
+        a useful hard negative: the detector must learn *not* to box it. Rendered
+        into a scratch layer so none of it reaches the ground truth.
+        """
+        cfg = self.config.detection
+        layer = Image.new("RGBA", page.size, (0, 0, 0, 0))
+        ignored: list[Polygon] = []
+        font_size = random.randint(*cfg.font_size_range)
+        style = TextStyle(fill_color=(25, 25, 35), opacity=255, bold_width=0)
+        self._fill_box(layer, area, take_word, ignored, font_size, style, 0, rtl)
+
+        layer = layer.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        # The reverse side has its own margins: its text never lines up with the front.
+        dx = int(page.width * random.uniform(-0.03, 0.03))
+        dy = int(page.height * random.uniform(-0.02, 0.02))
+        layer = layer.transform(layer.size, Image.Transform.AFFINE, (1, 0, -dx, 0, 1, -dy))
+        layer = layer.filter(ImageFilter.GaussianBlur(random.uniform(*cfg.bleed_through_blur_range)))
+        alpha = np.asarray(layer.getchannel("A"), dtype=np.float32) * random.uniform(*cfg.bleed_through_alpha_range)
+        layer.putalpha(Image.fromarray(alpha.astype(np.uint8), mode="L"))
+        page.alpha_composite(layer)
+
+    # -- pictures -----------------------------------------------------------
+
+    def _picture(self, size: tuple[int, int]) -> Image.Image:
+        """A text-free image for a page: a photo/texture crop, cloth, wood or a soft abstract."""
+        kind = random.random()
+        if kind < 0.45 and self.background_manager.bg_images:  # without images this would be blank
+            crop = self.background_manager.get_background_crop(size).convert("RGB")
+            if np.asarray(crop.convert("L"), dtype=np.float32).std() > 20:
+                return crop
+            kind = random.uniform(0.45, 1.0)  # a near-flat paper crop reads as an empty box, not a photo
+        if kind < 0.65:
+            return fabric(size)
+        if kind < 0.8:
+            return wood(size)
+        w, h = size  # soft colour fields with a horizon and blurred blobs - a stand-in photograph
+        top, bottom = np.random.randint(40, 230, 3), np.random.randint(20, 200, 3)
+        t = np.linspace(0, 1, h)[:, None, None]
+        arr = top[None, None, :] * (1 - t) + bottom[None, None, :] * t + np.zeros((h, w, 3))
+        img = Image.fromarray(arr.astype(np.uint8))
+        draw = ImageDraw.Draw(img)
+        for _ in range(random.randint(3, 12)):
+            r = random.randint(max(3, w // 30), max(4, w // 5))
+            cx, cy = random.randint(0, w), random.randint(int(h * 0.3), h)
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=tuple(int(c) for c in np.random.randint(10, 240, 3)))
+        return img.filter(ImageFilter.GaussianBlur(random.uniform(1.5, 6)))
+
+    def _place_picture(self, page, area, take_word, rtl, polygons, grayscale=False):
+        """A picture with an optional caption at the top of the text area; returns the area below.
+
+        Newspapers and brochures embed photos in the text. The picture is not text
+        and carries no label; the caption under it is text and does.
+        """
+        x0, y0, x1, y1 = area
+        ph = int((y1 - y0) * random.uniform(0.16, 0.38))
+        pw = (x1 - x0) if random.random() < 0.5 else int((x1 - x0) * random.uniform(0.45, 0.7))
+        if ph < 40 or pw < 60:
+            return area
+        px = x0 if not rtl else x1 - pw
+        picture = self._picture((pw, ph))
+        if grayscale and random.random() < 0.6:
+            picture = picture.convert("L").convert("RGB")
+        page.alpha_composite(picture.convert("RGBA"), (px, y0))
+        if random.random() < 0.4:
+            ImageDraw.Draw(page).rectangle((px, y0, px + pw - 1, y0 + ph - 1), outline=(40, 40, 45, 255), width=1)
+        y = y0 + ph + max(4, int(self._body_font() * 0.4))
+        if random.random() < 0.7:  # caption
+            fs = max(self._min_font(), int(self._body_font() * 0.85))
+            style = self._style_at(page, px, y, pw, fs * 2, 0)
+            y = self._fill_box(
+                page, (px, y, px + pw, y1), take_word, polygons, fs, style, 0, rtl, max_lines=random.randint(1, 2)
+            )
+        return (x0, y + max(6, int(self._body_font() * 0.8)), x1, y1)
+
+    # -- security printing -------------------------------------------------
+
+    @staticmethod
+    def _guilloche(page, box, radius: int) -> None:
+        """Fine wave/rosette line patterns printed under the fields of ID documents.
+
+        High-frequency, high-contrast structure that is not text - drawn light, so
+        printed fields over it stay legible.
+        """
+        x0, y0, x1, y1 = box
+        w, h = x1 - x0, y1 - y0
+        layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        colour = random.choice([(120, 160, 210), (200, 120, 150), (120, 180, 140), (190, 170, 110), (160, 140, 200)])
+        alpha = random.randint(70, 130)
+        if random.random() < 0.5:  # interleaved sine bands
+            period = random.uniform(0.15, 0.4) * w
+            amp = random.uniform(0.03, 0.12) * h
+            for k in range(random.randint(14, 30)):
+                base = h * k / 20.0
+                phase = random.uniform(0, 2 * math.pi)
+                pts = [(x, base + amp * math.sin(2 * math.pi * x / period + phase + k * 0.35)) for x in range(0, w, 3)]
+                d.line(pts, fill=(*colour, alpha), width=1)
+        else:  # rosette
+            cx, cy = random.uniform(0.3, 0.7) * w, random.uniform(0.3, 0.7) * h
+            r0, lobes = random.uniform(0.15, 0.35) * min(w, h), random.randint(6, 18)
+            for k in range(random.randint(10, 24)):
+                amp = r0 * random.uniform(0.15, 0.45)
+                phase = k * 2 * math.pi / 24
+                pts = []
+                for t in np.linspace(0, 2 * math.pi, 360):
+                    r = r0 + k * 2.5 + amp * math.sin(lobes * t + phase)
+                    pts.append((cx + r * math.cos(t), cy + r * math.sin(t)))
+                d.line(pts, fill=(*colour, alpha), width=1)
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
+        layer.putalpha(Image.fromarray(np.minimum(np.asarray(layer.getchannel("A")), np.asarray(mask))))
+        page.alpha_composite(layer, (x0, y0))
+
+    @staticmethod
+    def _chip(draw, box) -> None:
+        """A gold contact chip with its contact pads."""
+        x0, y0, x1, y1 = box
+        gold = random.choice([(212, 175, 95), (200, 165, 80), (190, 190, 195)])
+        draw.rounded_rectangle(box, radius=max(2, (x1 - x0) // 8), fill=gold, outline=(120, 95, 40), width=1)
+        mx, my = (x0 + x1) // 2, (y0 + y1) // 2
+        for xx in (x0 + (x1 - x0) // 3, mx, x0 + 2 * (x1 - x0) // 3):
+            draw.line((xx, y0 + 2, xx, y1 - 2), fill=(130, 100, 45), width=1)
+        draw.line((x0 + 2, my, x1 - 2, my), fill=(130, 100, 45), width=1)
+
+    @staticmethod
+    def _portrait(page, box) -> None:
+        """A stand-in ID photo: plain backdrop, head and shoulders, softly lit."""
+        x0, y0, x1, y1 = box
+        w, h = max(1, x1 - x0), max(1, y1 - y0)
+        bg = random.choice([(205, 212, 222), (230, 230, 230), (190, 205, 225), (225, 220, 205)])
+        img = Image.new("RGB", (w, h), bg)
+        d = ImageDraw.Draw(img)
+        skin = random.choice([(232, 200, 175), (198, 150, 115), (150, 105, 75), (95, 65, 45)])
+        cloth = random.choice([(40, 45, 60), (90, 90, 100), (150, 60, 60), (230, 230, 235)])
+        d.ellipse((int(w * 0.05), int(h * 0.68), int(w * 0.95), int(h * 1.3)), fill=cloth)  # shoulders
+        d.ellipse((int(w * 0.3), int(h * 0.18), int(w * 0.7), int(h * 0.7)), fill=skin)  # head
+        hair = random.choice([(30, 25, 20), (90, 60, 35), (160, 120, 70), (200, 200, 200)])
+        d.chord((int(w * 0.28), int(h * 0.12), int(w * 0.72), int(h * 0.55)), 180, 360, fill=hair)
+        img = img.filter(ImageFilter.GaussianBlur(max(0.6, w / 120)))
+        if random.random() < 0.5:
+            img = img.convert("L").convert("RGB")
+        page.alpha_composite(img.convert("RGBA"), (x0, y0))
+        ImageDraw.Draw(page).rectangle((x0, y0, x0 + w - 1, y0 + h - 1), outline=(150, 150, 162, 255))
+
+    # -- negative pages ---------------------------------------------------
+
+    #: Kinds of text-free page and how often each is drawn.
+    NEGATIVE_KINDS = {
+        "blank": 0.06,
+        "empty_form": 0.15,
+        "graphics": 0.12,
+        "photo": 0.08,
+        "backside": 0.15,
+        "texture": 0.2,
+        "creased_sheet": 0.24,
+    }
+
+    def _draw_negative(self, page, area, take_word, rtl, kind=None):
+        """Content of a page with no labelled text.
+
+        Returns the (possibly replaced) page and whether it must be photographed:
+        a creased blank sheet is a camera shot of paper lying on cloth or wood.
+        """
+        if kind is None:
+            kind = random.choices(list(self.NEGATIVE_KINDS), weights=list(self.NEGATIVE_KINDS.values()))[0]
+        elif kind not in self.NEGATIVE_KINDS:
+            raise ValueError(f"unknown negative kind {kind!r}; expected one of {sorted(self.NEGATIVE_KINDS)}")
+        if kind == "photo" and not self.background_manager.bg_images:
+            kind = "texture"  # without background images a "photo" would be a blank frame
+        if kind == "texture":
+            # The frame is all tablecloth, crumpled paper or table top.
+            page = surface(page.size, weights=(0.55, 0.15, 0.3)).convert("RGBA")
+            return page, False
+        if kind == "photo":
+            # A photograph or texture as the whole frame - and no text in it.
+            page = self.background_manager.get_page_background(page.size).convert("RGBA")
+        elif kind == "empty_form":
+            self._draw_empty_form(page, area)
+        elif kind == "graphics":
+            self._draw_graphics(page, area)
+        elif kind == "creased_sheet":
+            page = self._paper_background(page.size).convert("RGBA")  # paper, not a photo
+            if random.random() < 0.4:
+                page = self._tinted(page)  # a coloured flyer, kraft paper or receipt roll
+        if take_word is not None and (kind == "backside" or random.random() < 0.3):
+            self._add_bleed_through(page, area, take_word, rtl)
+        if kind == "creased_sheet":
+            # Folded in quarters, then crumpled in a pocket: hard ridges and facets.
+            page = apply_creases(
+                page, crumple=random.uniform(0.4, 1.6), folds=random.randint(1, 5), strength=random.uniform(1.5, 3.0)
+            )
+            return page, True
+        if random.random() < 0.35:
+            page = apply_creases(page, crumple=random.uniform(0.3, 1.5) if random.random() < 0.5 else 0.0)
+        return page, False
+
+    @staticmethod
+    def _tinted(page):
+        """``page`` multiplied by a paper colour (keeps the paper's own texture)."""
+        # yellow, green, blue, pink, kraft
+        tint = random.choice([
+            (1.0, 0.96, 0.7),
+            (0.86, 0.94, 0.86),
+            (0.88, 0.93, 1.0),
+            (1.0, 0.88, 0.9),
+            (0.85, 0.72, 0.52),
+        ])
+        arr = np.asarray(page).astype(np.float32)
+        arr[..., :3] *= np.array(tint, np.float32)
+        return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), page.mode)
+
+    def _line_ink(self) -> tuple[int, int, int, int]:
+        tone = random.randint(20, 110)
+        if random.random() < 0.2:
+            return (*random.choice([(38, 62, 120), (28, 90, 70), (120, 40, 48)]), 255)
+        return (tone, tone, tone + random.randint(0, 12), 255)
+
+    def _draw_empty_form(self, page, area) -> None:
+        """Rules, boxes, checkboxes and grids of a form nobody has filled in yet."""
+        x0, y0, x1, y1 = area
+        draw = ImageDraw.Draw(page)
+        ink = self._line_ink()
+        unit = max(14, int((y1 - y0) / random.uniform(22, 40)))
+        width = max(1, unit // 14)
+        y = y0 + unit
+        while y < y1 - unit:
+            kind = random.random()
+            if kind < 0.35:  # label space + underline
+                start = x0 + int((x1 - x0) * random.uniform(0.15, 0.4))
+                draw.line((start, y + unit, x1 - random.randint(0, unit * 3), y + unit), fill=ink, width=width)
+                y += int(unit * 1.8)
+            elif kind < 0.55:  # boxed field
+                start = x0 + int((x1 - x0) * random.uniform(0.1, 0.35))
+                draw.rectangle((start, y, x1, y + unit), outline=ink, width=width)
+                y += int(unit * 1.8)
+            elif kind < 0.7:  # a row of checkboxes
+                for _ in range(random.randint(2, 5)):
+                    cx = random.randint(x0, max(x0, x1 - unit))
+                    draw.rectangle((cx, y, cx + int(unit * 0.7), y + int(unit * 0.7)), outline=ink, width=width)
+                y += int(unit * 1.6)
+            elif kind < 0.9:  # an empty table
+                rows, cols = random.randint(2, 6), random.randint(2, 6)
+                h = min(y1 - y, rows * unit * 1.4)
+                xs = sorted({x0, x1, *(random.randint(x0 + unit, x1 - unit) for _ in range(cols - 1))})
+                for c in xs:
+                    draw.line((c, y, c, y + h), fill=ink, width=width)
+                for r in range(rows + 1):
+                    draw.line((x0, y + r * h / rows, x1, y + r * h / rows), fill=ink, width=width)
+                y += int(h + unit)
+            else:  # a shaded section bar
+                tone = random.randint(205, 235)
+                draw.rectangle((x0, y, x1, y + int(unit * 0.9)), fill=(tone, tone, tone, 255))
+                y += int(unit * 1.6)
+        if random.random() < 0.4:
+            self._draw_signature(draw, area)
+
+    def _draw_graphics(self, page, area) -> None:
+        """Charts without labels, shapes, rules, barcodes and logos."""
+        x0, y0, x1, y1 = area
+        draw = ImageDraw.Draw(page)
+        for _ in range(random.randint(1, 4)):
+            w = int((x1 - x0) * random.uniform(0.25, 0.9))
+            h = int((y1 - y0) * random.uniform(0.12, 0.35))
+            bx = random.randint(x0, max(x0, x1 - w))
+            by = random.randint(y0, max(y0, y1 - h))
+            ink = self._line_ink()
+            kind = random.random()
+            if kind < 0.35:  # bar chart: axes and bars, no labels
+                draw.line((bx, by, bx, by + h, bx + w, by + h), fill=ink, width=2)
+                n = random.randint(3, 12)
+                step = w / (n + 1)
+                fill = random.choice([(42, 120, 214), (235, 104, 52), (27, 175, 122), (90, 90, 100)])
+                for i in range(n):
+                    bh = int(h * random.uniform(0.1, 0.95))
+                    left = bx + step * (i + 0.5)
+                    draw.rectangle((left, by + h - bh, left + step * 0.6, by + h - 1), fill=(*fill, 255))
+            elif kind < 0.55:  # line chart
+                draw.line((bx, by, bx, by + h, bx + w, by + h), fill=ink, width=2)
+                pts = [(bx + w * i / 12, by + h * random.uniform(0.1, 0.9)) for i in range(13)]
+                draw.line(pts, fill=(42, 120, 214, 255), width=3)
+            elif kind < 0.75:  # shapes
+                for _ in range(random.randint(2, 6)):
+                    r = random.randint(8, max(9, h // 3))
+                    cx, cy = random.randint(bx, bx + w), random.randint(by, by + h)
+                    colour = (*random.choice([(42, 120, 214), (235, 104, 52), (27, 175, 122), (237, 161, 0)]), 255)
+                    if random.random() < 0.5:
+                        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=colour)
+                    else:
+                        draw.rectangle((cx - r, cy - r, cx + r, cy + r), outline=colour, width=3)
+            else:  # rules and frames
+                for k in range(random.randint(2, 8)):
+                    yy = by + k * h / 8
+                    draw.line((bx, yy, bx + w, yy), fill=ink, width=random.randint(1, 3))
+        if random.random() < 0.6:
+            self._draw_non_text_mark(page, area, draw, [])
+
+    # -- page furniture ---------------------------------------------------
+
+    def _add_furniture(self, page, area, take_word, rtl, polygons) -> None:
+        """Add the things that sit *around* the body: headers, stamps, marks.
+
+        The label split matters here. A stamp and a page number are **text** and
+        must be boxed. A logo, a barcode and a redaction bar are **not** text and
+        are deliberately left unlabelled - they are the hard negatives that teach
+        a detector to ignore high-contrast non-text structure, which is a classic
+        false-positive source on real documents.
+        """
+        cfg = self.config.detection
+        bx0, by0, bx1, by1 = area
+        draw = ImageDraw.Draw(page)
+
+        if random.random() < 0.6:  # running header / footer with a page number
+            fs = self._min_font()
+            for edge_y, live in ((by0 - int(fs * 2.2), True), (by1 + int(fs * 0.8), True)):
+                if not live or edge_y < 2 or edge_y + fs * 1.4 > page.height - 2:
+                    continue
+                if random.random() < 0.5:
+                    continue
+                style = self._style_at(page, bx0, edge_y, bx1 - bx0, fs * 2, 0)
+                self._fill_box(
+                    page,
+                    (bx0, edge_y, int(bx1 - (bx1 - bx0) * 0.25), edge_y + fs * 2),
+                    take_word,
+                    polygons,
+                    fs,
+                    style,
+                    0,
+                    rtl,
+                    max_lines=1,
+                )
+                page_no = random.choice([
+                    str(random.randint(1, 99)),
+                    f"- {random.randint(1, 99)} -",
+                    f"{random.randint(1, 9)}/{random.randint(9, 99)}",
+                ])
+                self._place_token(page, page_no, bx1, edge_y, fs, style, 0, polygons, align_right=True)
+
+        if random.random() < cfg.logo_prob:  # logo block or barcode: NOT text, NOT labelled
+            self._draw_non_text_mark(page, area, draw, polygons)
+
+        if random.random() < cfg.stamp_prob:  # a stamp IS text and IS labelled
+            self._draw_stamp(page, area, take_word, polygons)
+
+        if random.random() < cfg.redaction_prob:  # redaction bar: covers text, unlabelled
+            fs = self._body_font()
+            rx0 = random.randint(bx0, max(bx0, bx1 - int((bx1 - bx0) * 0.3)))
+            rw = random.randint(int((bx1 - bx0) * 0.12), int((bx1 - bx0) * 0.4))
+            ry = random.randint(by0, max(by0, by1 - fs * 2))
+            bar = (rx0, ry, min(bx1, rx0 + rw), ry + int(fs * 1.3))
+            draw.rectangle(bar, fill=(20, 20, 24))
+            polygons[:] = self._occlude(polygons, bar)
+
+        if random.random() < cfg.signature_prob:
+            self._draw_signature(draw, area)
+
+    @staticmethod
+    def _clip_polygons(polygons: list[Polygon], width: int, height: int) -> list[Polygon]:
+        """Clamp boxes to the page and drop any that fall entirely outside it."""
+        kept: list[Polygon] = []
+        for poly in polygons:
+            xs = [pt[0] for pt in poly]
+            ys = [pt[1] for pt in poly]
+            if max(xs) <= 0 or min(xs) >= width or max(ys) <= 0 or min(ys) >= height:
+                continue
+            clipped = [[min(max(x, 0), width), min(max(y, 0), height)] for x, y in poly]
+            cxs = [pt[0] for pt in clipped]
+            cys = [pt[1] for pt in clipped]
+            if max(cxs) - min(cxs) < 2 or max(cys) - min(cys) < 2:
+                continue  # a sliver of a glyph is not a usable label
+            kept.append(clipped)
+        return kept
+
+    def _punch_holes(self, page, margin: int, polygons: list[Polygon]) -> None:
+        """Two filing holes in the left margin (ISO 838: 80 mm apart on A4), showing the lid behind."""
+        width, height = page.size
+        radius = max(3, int(width * random.uniform(0.012, 0.016)))
+        cx = int(min(margin * random.uniform(0.35, 0.6), width * 0.06))
+        if cx - radius < 1:
+            return
+        gap = height * 80.0 / 297.0
+        centre = height / 2.0 + random.uniform(-0.03, 0.03) * height
+        lid = random.choice([random.randint(15, 60), random.randint(225, 250)])
+        draw = ImageDraw.Draw(page)
+        for cy in (centre - gap / 2.0, centre + gap / 2.0):
+            box = (cx - radius, int(cy) - radius, cx + radius, int(cy) + radius)
+            draw.ellipse(box, fill=(lid, lid, lid, 255), outline=(max(0, lid - 40),) * 3 + (255,))
+            polygons[:] = self._occlude(polygons, box)
+
+    @staticmethod
+    def _occlude(polygons: list[Polygon], box) -> list[Polygon]:
+        """Labels after an opaque shape is painted over ``box``.
+
+        A word mostly under it is gone; one it only clips keeps the box of its
+        visible part, so a label never covers ink that is no longer there.
+        """
+        rx0, ry0, rx1, ry1 = box
+        kept: list[Polygon] = []
+        for poly in polygons:
+            xs = [pt[0] for pt in poly]
+            ys = [pt[1] for pt in poly]
+            px0, px1, py0, py1 = min(xs), max(xs), min(ys), max(ys)
+            if px1 <= rx0 or px0 >= rx1 or py1 <= ry0 or py0 >= ry1:
+                kept.append(poly)
+                continue
+            # The largest visible remainder on any side of the box.
+            sides = [
+                (rx0 - px0) * (py1 - py0),  # left of it
+                (px1 - rx1) * (py1 - py0),  # right of it
+                (ry0 - py0) * (px1 - px0),  # above it
+                (py1 - ry1) * (px1 - px0),  # below it
+            ]
+            best = max(range(4), key=lambda i: sides[i])
+            if sides[best] < 0.5 * (px1 - px0) * (py1 - py0):
+                continue  # mostly hidden: no label
+            if best == 0:
+                px1 = rx0
+            elif best == 1:
+                px0 = rx1
+            elif best == 2:
+                py1 = ry0
+            else:
+                py0 = ry1
+            kept.append([[px0, py0], [px1, py0], [px1, py1], [px0, py1]])
+        return kept
+
+    @staticmethod
+    def _mostly_inside(poly: Polygon, box) -> bool:
+        """True when a word polygon is largely covered by ``box``.
+
+        A redaction bar hides the ink, so its labels have to go with it -
+        otherwise the ground truth points at a solid black rectangle.
+        """
+        rx0, ry0, rx1, ry1 = box
+        xs = [pt[0] for pt in poly]
+        ys = [pt[1] for pt in poly]
+        px0, px1, py0, py1 = min(xs), max(xs), min(ys), max(ys)
+        ox = max(0.0, min(px1, rx1) - max(px0, rx0))
+        oy = max(0.0, min(py1, ry1) - max(py0, ry0))
+        area = max(1e-6, (px1 - px0) * (py1 - py0))
+        return (ox * oy) / area > 0.5
+
+    @staticmethod
+    def _free_spot(
+        size: tuple[int, int], candidates_x: list[int] | range, candidates_y: list[int] | range, polygons, pad: int = 6
+    ) -> tuple[int, int] | None:
+        """A top-left corner where a ``size`` box overlaps no labelled word, or ``None``.
+
+        Furniture painted over body text hides words whose polygons stay in the
+        ground truth - the detector is then taught to find text that is not
+        visible. Marks therefore only go where the page is empty.
+        """
+        w, h = size
+        boxes = []
+        for poly in polygons:
+            xs = [pt[0] for pt in poly]
+            ys = [pt[1] for pt in poly]
+            boxes.append((min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad))
+        xs_list, ys_list = list(candidates_x), list(candidates_y)
+        if not xs_list or not ys_list:
+            return None
+        for _ in range(40):
+            x, y = random.choice(xs_list), random.choice(ys_list)
+            if not any(x < b[2] and x + w > b[0] and y < b[3] and y + h > b[1] for b in boxes):
+                return x, y
+        return None
+
+    def _draw_non_text_mark(self, page, area, draw, polygons=()) -> None:
+        """A logo block or a barcode - high-contrast, structured and *not* text.
+
+        Drawn only into free space (see :meth:`_free_spot`); skipped when the
+        page has none.
+        """
+        bx0, by0, bx1, by1 = area
+        width = bx1 - bx0
+        if random.random() < 0.5:  # barcode
+            bw = int(width * random.uniform(0.25, 0.45))
+            bh = int(bw * random.uniform(0.25, 0.4))
+            spot = self._free_spot(
+                (bw + 8, bh + 8),
+                range(bx0 - 4, max(bx0 - 3, bx1 - bw - 4)),
+                range(by0 - 4, max(by0 - 3, by1 - bh - 4)),
+                polygons,
+            )
+            if spot is None:
+                return
+            x, y = spot[0] + 4, spot[1] + 4
+            draw.rectangle((x - 4, y - 4, x + bw + 4, y + bh + 4), fill=(252, 252, 252))
+            cursor = x
+            while cursor < x + bw:
+                bar_w = random.randint(1, max(2, bw // 40))
+                if random.random() < 0.55:
+                    draw.rectangle((cursor, y, cursor + bar_w, y + bh), fill=(15, 15, 18))
+                cursor += bar_w + random.randint(1, 3)
+        else:  # abstract logo mark
+            size = int(width * random.uniform(0.08, 0.16))
+            top = by0 - size // 2 if by0 - size // 2 > 2 else by0
+            spot = self._free_spot((size, size), [bx0, bx1 - size], [top, by1 - size], polygons)
+            if spot is None:
+                return
+            x, y = spot
+            color = random.choice([(38, 62, 120), (28, 90, 70), (120, 40, 48), (40, 40, 48)])
+            shape = random.random()
+            if shape < 0.4:
+                draw.ellipse((x, y, x + size, y + size), fill=color)
+            elif shape < 0.7:
+                draw.rectangle((x, y, x + size, y + size), fill=color)
+            else:
+                draw.polygon([(x + size / 2, y), (x + size, y + size), (x, y + size)], fill=color)
+
+    def _draw_stamp(self, page, area, take_word, polygons) -> None:
+        """A rotated stamp over the body text - text, so labelled.
+
+        Stamps land *on top of* existing words, which is exactly the overlap a
+        real detector has to survive; nothing is removed from the ground truth.
+        """
+        bx0, by0, bx1, by1 = area
+        word = take_word().upper()
+        font_size = int(random.randint(*self.config.detection.font_size_range) * random.uniform(1.3, 2.0))
+        bold = self._heading_bold(font_size)
+        coverage = self._render_word(word, font_size, bold, "heading")
+        if coverage is None:
+            return
+        angle = random.uniform(-35, 35)
+        coverage = coverage.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
+        if coverage.width >= bx1 - bx0 or coverage.height >= by1 - by0:
+            return
+        ink = random.choice([(170, 40, 45), (35, 60, 140), (40, 110, 70), (60, 60, 66)])
+        style = TextStyle(fill_color=ink, opacity=random.randint(150, 225), bold_width=0)
+        x = random.randint(bx0, bx1 - coverage.width)
+        y = random.randint(by0, by1 - coverage.height)
+        self._emit(page, coverage, style, x, y, polygons)
+        if random.random() < 0.5:  # the box a rubber stamp leaves around the word
+            pad = max(4, font_size // 3)
+            ImageDraw.Draw(page).rectangle(
+                (x - pad, y - pad // 2, x + coverage.width + pad, y + coverage.height + pad // 2),
+                outline=(*ink, 210),
+                width=max(2, font_size // 10),
+            )
+
+    @staticmethod
+    def _draw_signature(draw, area) -> None:
+        """A looping ink squiggle - handwriting-shaped, but not a word."""
+        bx0, by0, bx1, by1 = area
+        width = int((bx1 - bx0) * random.uniform(0.18, 0.35))
+        height = int(width * random.uniform(0.2, 0.35))
+        x = random.randint(bx0, max(bx0, bx1 - width))
+        y = random.randint(by0, max(by0, by1 - height))
+        ink = random.choice([(25, 35, 90), (20, 20, 25)])
+        points = []
+        for i in range(random.randint(18, 34)):
+            t = i / 24.0
+            points.append((
+                x + width * (i / 30.0) + random.uniform(-3, 3),
+                y + height / 2 + math.sin(t * random.uniform(5, 9)) * height / 2 + random.uniform(-2, 2),
+            ))
+        draw.line(points, fill=ink, width=max(1, height // 14), joint="curve")
 
     # -- vertical text ----------------------------------------------------
 
@@ -246,7 +1104,36 @@ class PageGenerator:
             return "stacked"
         return "ccw" if random.random() < cfg.vertical_ccw_prob else "cw"
 
-    def _render_stacked_word(self, word: str, font_size: int, bold_width: int):
+    @staticmethod
+    def _is_stackable(text: str) -> bool:
+        """Whether upright glyph-by-glyph stacking is right for this text.
+
+        Stacking is a CJK convention: the glyphs are square, so a column reads
+        naturally. Latin, Cyrillic and Arabic are not - stacking them spells a
+        word letter-under-letter, which outside of a shop sign no document does.
+        Short numerals and single marks are fine either way, since they occur
+        stacked on real signage and labels.
+        """
+        chars = [c for c in text if not c.isspace()]
+        if not chars:
+            return False
+        if len(chars) <= 2 and all(c.isdigit() or not c.isalpha() for c in chars):
+            return True  # "12", "%", "-" read fine upright
+        for char in chars:
+            code = ord(char)
+            cjk = (
+                0x3000 <= code <= 0x30FF  # CJK punctuation, kana
+                or 0x3400 <= code <= 0x4DBF  # extension A
+                or 0x4E00 <= code <= 0x9FFF  # unified ideographs
+                or 0xAC00 <= code <= 0xD7AF  # hangul
+                or 0xF900 <= code <= 0xFAFF  # compatibility ideographs
+                or 0xFF00 <= code <= 0xFFEF  # fullwidth forms
+            )
+            if not cjk:
+                return False
+        return True
+
+    def _render_stacked_word(self, word: str, font_size: int, bold_width: int, role: str = "body"):
         """Render a word as upright glyphs stacked top-to-bottom (signage / CJK).
 
         Each glyph is centred in a fixed-height cell so the column keeps an even
@@ -257,7 +1144,7 @@ class PageGenerator:
             return None
         glyphs = []
         for char in chars:
-            glyph = self._render_word(char, font_size, bold_width)
+            glyph = self._render_word(char, font_size, bold_width, role)
             if glyph is None:
                 return None
             glyphs.append(glyph)
@@ -269,7 +1156,9 @@ class PageGenerator:
             column.alpha_composite(glyph, ((width - glyph.width) // 2, i * cell + (cell - glyph.height) // 2))
         return column
 
-    def _render_vertical_word(self, word: str, font_size: int, bold_width: int, mode: str):
+    def _render_vertical_word(
+        self, word: str, font_size: int, bold_width: int, mode: str, role: str = "body", fallback: str = "ccw"
+    ):
         """Render one word for a vertical run (rotated 90 degrees, or stacked).
 
         ``"ccw"`` reads bottom-to-top (the usual left-margin annotation),
@@ -277,12 +1166,19 @@ class PageGenerator:
         ``"stacked"`` keeps the glyphs upright.
         """
         if mode == "stacked":
-            return self._render_stacked_word(word, font_size, bold_width)
-        coverage = self._render_word(word, font_size, bold_width)
+            if self._is_stackable(word):
+                return self._render_stacked_word(word, font_size, bold_width, role)
+            # A column drawing mixed scripts keeps one rotation for the whole
+            # column, so the fallback is decided once by the caller.
+            mode = fallback
+        coverage = self._render_word(word, font_size, bold_width, role)
         if coverage is None:
             return None
         rotation = Image.Transpose.ROTATE_90 if mode == "ccw" else Image.Transpose.ROTATE_270
-        return coverage.transpose(rotation)
+        rotated = coverage.transpose(rotation)
+        rotated.info.pop("ink_top", None)  # a rotated word's baseline is a column, not a line
+        rotated.info.pop("band", None)
+        return rotated
 
     def _fill_column(
         self,
@@ -298,6 +1194,7 @@ class PageGenerator:
         columns_rtl=True,
         rule_color=None,
         col_width=None,
+        role="body",
     ) -> int:
         """Fill a box with vertical columns of text; return the x boundary reached.
 
@@ -312,7 +1209,12 @@ class PageGenerator:
             spacing = random.uniform(*self.config.detection.vertical_line_spacing_range)
             col_width = max(font_size + 2, int(font_size * spacing))
         col_width = max(1, int(col_width))
-        gap = max(2, int(font_size * 0.33))
+        fallback = "ccw" if random.random() < self.config.detection.vertical_ccw_prob else "cw"
+        # Rotated words need more air between them than stacked glyphs do: a
+        # stacked CJK column is meant to be tight, whereas rotated Latin words
+        # run into each other and read as one long token.
+        gap_scale = 0.33 if mode == "stacked" else random.uniform(*self.config.detection.vertical_word_gap_range)
+        gap = max(2, int(font_size * gap_scale))
         upward = mode == "ccw"  # bottom-to-top reading order
         cols = 0
         while cols < max_columns:
@@ -322,7 +1224,7 @@ class PageGenerator:
             cursor = by1 if upward else by0
             col_has_word = False
             for _ in range(400):  # bounded attempts per column
-                coverage = self._render_vertical_word(take_word(), font_size, bold_width, mode)
+                coverage = self._render_vertical_word(take_word(), font_size, bold_width, mode, role, fallback)
                 if coverage is None or coverage.width > bx1 - bx0:
                     continue
                 wh = coverage.height
@@ -353,7 +1255,7 @@ class PageGenerator:
         colliding - the body layout simply never sees that space.
         """
         cfg = self.config.detection
-        if layout in ("vertical", "id_card") or cfg.vertical_prob <= 0:
+        if layout in ("vertical", "id_card", "receipt") or cfg.vertical_prob <= 0:
             return area, []
         if random.random() >= cfg.vertical_prob:
             return area, []
@@ -383,15 +1285,18 @@ class PageGenerator:
         cfg = self.config.detection
         rx0, ry0, rx1, ry1 = region
         width = rx1 - rx0
-        if width < 12 or ry1 - ry0 < 40:
+        # A rotated word occupies ~1.45x the font size across the column, so a
+        # strip narrower than that cannot hold legible type: skip it entirely.
+        if width < self._min_font() * 1.45 or ry1 - ry0 < 40:
             return
 
         if random.random() < cfg.vertical_banner_prob:
             band = random.choice([(38, 62, 120), (28, 90, 70), (120, 40, 48), (60, 55, 80), (35, 35, 42)])
             ImageDraw.Draw(page).rectangle((rx0, ry0, rx1, ry1), fill=band)
+            polygons[:] = self._occlude(polygons, (rx0, ry0, rx1, ry1))
 
         # A rotated word occupies ~1.3x the font size across the column.
-        font_size = max(9, min(int(width / 1.45), cfg.font_size_range[1]))
+        font_size = max(self._min_font(), min(int(width / 1.45), cfg.font_size_range[1]))
         mode = self._choose_vertical_mode()
         bold_width = self._heading_bold(font_size) if random.random() < 0.35 else self._maybe_bold(font_size)
         style = self._style_at(page, rx0, ry0, width, ry1 - ry0, bold_width)
@@ -426,7 +1331,9 @@ class PageGenerator:
             hfs = int(random.randint(*cfg.detection.font_size_range) * random.uniform(1.5, 2.4))
             hbw = self._heading_bold(hfs)
             hstyle = self._style_at(page, bx0, y, bx1 - bx0, hfs * 2, hbw)
-            y = self._fill_box(page, (bx0, y, bx1, by1), take_word, polygons, hfs, hstyle, hbw, rtl, max_lines=1)
+            y = self._fill_box(
+                page, (bx0, y, bx1, by1), take_word, polygons, hfs, hstyle, hbw, rtl, max_lines=1, role="heading"
+            )
             y += int(hfs * 0.3)
             draw.line((bx0, y, bx1, y), fill=(120, 120, 130), width=1)
             y += int(hfs * 0.4)
@@ -436,7 +1343,9 @@ class PageGenerator:
             tfs = int(random.randint(*cfg.detection.font_size_range) * random.uniform(1.5, 2.2))
             tbw = self._heading_bold(tfs)
             tstyle = self._style_at(page, bx1 - tfs * 2, y, tfs * 2, (by1 - y) // 2, tbw)
-            x = self._fill_column(page, (bx0, y, x, by1), take_word, polygons, tfs, tstyle, tbw, mode, max_columns=1)
+            x = self._fill_column(
+                page, (bx0, y, x, by1), take_word, polygons, tfs, tstyle, tbw, mode, max_columns=1, role="heading"
+            )
             x -= int(tfs * 0.4)
 
         # Body columns tile the remaining width exactly, so the page always fills
@@ -445,7 +1354,7 @@ class PageGenerator:
         spacing = random.uniform(*cfg.detection.vertical_line_spacing_range)
         ncols = random.randint(lo, hi)
         col_width = max(14, (x - bx0) // max(1, ncols))
-        font_size = max(9, min(int(col_width / spacing), cfg.detection.font_size_range[1]))
+        font_size = max(self._min_font(), min(int(col_width / spacing), cfg.detection.font_size_range[1]))
         col_width = min(col_width, int(font_size * spacing) + 4)  # no oversized gutters
         ncols = max(1, (x - bx0) // col_width)
 
@@ -466,25 +1375,147 @@ class PageGenerator:
             col_width=col_width,
         )
 
-    def _body_font(self) -> int:
-        lo, hi = self.config.detection.font_size_range
+    def _page_size(self, layout: str) -> tuple[int, int]:
+        """Page dimensions for ``layout``.
+
+        With the physical media model the page is a real sheet at a real scan
+        resolution (see :mod:`.media`); ``self._media`` then drives type sizes
+        too. Without it, pages are pixel rectangles as before, and receipts get
+        their own geometry because a thermal roll is far narrower and longer
+        than any value ``page_*_range`` can produce.
+        """
+        cfg = self.config.detection
+        if self.config.media.enabled and not self.config.pins_page_size():
+            self._media = sample_media(self.config, layout)
+            return self._media.width_px, self._media.height_px
+
+        if layout == "receipt" and not self.config.pins_page_size():
+            width = random.randint(*cfg.receipt_width_range)
+            height = random.randint(*cfg.receipt_height_range)
+        else:
+            width = random.randint(*cfg.page_width_range)
+            height = random.randint(*cfg.page_height_range)
+
+        # A pinned size still gets the media model, at the DPI those pixels imply,
+        # so points and fine print keep working without breaking the contract.
+        self._media = media_for_pinned_size(self.config, width, height) if self.config.media.enabled else None
+        return width, height
+
+    # -- handwriting ------------------------------------------------------
+
+    def _handwriting_font(self, text: str) -> str | None:
+        """Resolve (and pin for the page) a handwriting face for filled-in values."""
+        if "handwriting" in self._page_fonts:
+            pinned = self._page_fonts["handwriting"]
+            if not pinned:
+                return None
+            if self.font_selector.supports(text, pinned):
+                return pinned
+        resolved = self.font_selector.get_handwriting_font(text)
+        self._page_fonts.setdefault("handwriting", resolved or "")
+        return resolved
+
+    def _write_by_hand(self, page, box, take_word, polygons, font_size, style) -> bool:
+        """Fill ``box`` with a hand-written value; False if no handwriting face fits.
+
+        Handwriting sits slightly above the printed baseline and wanders, so each
+        word is nudged - a perfectly aligned "hand-written" row reads as printed.
+        """
+        bx0, by0, bx1, by1 = box
+        cursor = bx1 if self._rtl_page else bx0
+        placed = False
+        for _ in range(24):
+            word = take_word()
+            font_path = self._handwriting_font(word)
+            if font_path is None:
+                return placed
+            coverage = self.text_renderer.render_coverage(word, font_path, font_size, 0)
+            width = coverage.width
+            paste_x = cursor - width if self._rtl_page else cursor
+            if (paste_x < bx0) if self._rtl_page else (paste_x + width > bx1):
+                break
+            wobble = random.randint(-max(1, font_size // 8), max(1, font_size // 8))
+            if self._emit(page, coverage, style, paste_x, by0 + wobble, polygons):
+                placed = True
+            step = width + max(3, int(font_size * 0.35))
+            cursor = (paste_x - max(3, int(font_size * 0.35))) if self._rtl_page else (paste_x + step)
+        return placed
+
+    def _min_font(self) -> int:
+        """The smallest font size any layout may use.
+
+        ``font_size_range[0]`` is a promise to the caller, not a hint. Layouts
+        that cannot fit type at this size must change their geometry - fewer
+        columns, a wider strip, or skip the element - because silently shrinking
+        below the configured floor produces text that no amount of careful
+        augmentation can keep readable.
+        """
+        if self._media is not None:
+            # What must stay legible is the *delivered* glyph, so a page that
+            # will be downscaled has to render its smallest type larger.
+            return self._media.min_render_px_for_delivery(self.config.media.min_delivery_text_px)
+        return max(6, self.config.detection.font_size_range[0])
+
+    def _body_font(self, fine_print: bool = False) -> int:
+        """Body type size in render pixels.
+
+        Under the media model the size is chosen in *points* and converted at
+        the page's scan resolution, which is what lets a 6pt footnote exist as
+        genuinely small text instead of an illegible 8px smudge.
+        """
+        cfg = self.config.detection
+        if self._media is not None:
+            points = random.uniform(*(cfg.fine_print_point_range if fine_print else cfg.body_point_range))
+            return max(self._min_font(), self._media.points_to_px(points))
+        lo, hi = cfg.font_size_range
+        if fine_print:
+            return max(self._min_font(), int(lo * random.uniform(0.72, 0.92)))
         return random.randint(lo, max(lo, (lo + hi) // 2))  # smaller end -> denser
 
     def _layout_paragraph(self, page, area, take_word, rtl, polygons) -> None:
         cfg = self.config
         bx0, by0, bx1, by1 = area
+        # Run past the margin only where the margin is the page edge: a reserved
+        # vertical strip would be painted over the overflowing words.
+        if not self._has_vertical_regions and random.random() < cfg.detection.edge_truncation_prob:
+            # Let the block run past the margin so words are clipped by the page
+            # edge. Every word used to sit fully inside the margins, so the model
+            # never saw a partial glyph - common on any hand-held capture.
+            overflow = int((bx1 - bx0) * random.uniform(0.04, 0.12))
+            if random.random() < 0.5:
+                bx0 -= overflow
+            else:
+                bx1 += overflow
         y, blocks = by0, 0
         while y < by1 and blocks < cfg.detection.max_blocks:
             blocks += 1
             base = random.randint(*cfg.detection.font_size_range)
             heading = random.random() < cfg.detection.heading_prob
-            font_size = int(base * random.uniform(1.4, 1.9)) if heading else base
+            if heading:
+                font_size = int(base * random.uniform(*cfg.detection.heading_point_scale))
+            elif random.random() < cfg.detection.fine_print_prob:
+                font_size = self._body_font(fine_print=True)  # footnote / legal small print
+            else:
+                font_size = base
             bold_width = self._heading_bold(font_size) if heading else self._maybe_bold(font_size)
-            style = self._style_at(page, bx0, y, 240, font_size * 2, bold_width)
             indent = random.randint(0, int((bx1 - bx0) * 0.08)) if (not heading and random.random() < 0.25) else 0
             max_lines = 2 if heading else random.randint(2, 8)
+            # Judge the ink over every line the block will occupy, not just the first.
+            style = self._style_at(
+                page, bx0, y, bx1 - bx0, font_size * 2, bold_width, extent=font_size * 1.6 * max_lines
+            )
             y = self._fill_box(
-                page, (bx0, y, bx1, by1), take_word, polygons, font_size, style, bold_width, rtl, max_lines, indent
+                page,
+                (bx0, y, bx1, by1),
+                take_word,
+                polygons,
+                font_size,
+                style,
+                bold_width,
+                rtl,
+                max_lines,
+                indent,
+                role="heading" if heading else "body",
             )
             y += int(font_size * random.uniform(*cfg.detection.block_gap_range))
 
@@ -510,6 +1541,7 @@ class PageGenerator:
                 rtl,
                 max_lines=1,
                 line_spacing=(1.05, 1.2),
+                role="heading",
             )
             y += int(hfs * 0.18)
             draw.line((bx0, y, bx1, y), fill=rule, width=max(2, int(hfs * 0.05)))
@@ -556,6 +1588,7 @@ class PageGenerator:
                         rtl,
                         max_lines=random.randint(1, 2),
                         line_spacing=(1.1, 1.25),
+                        role="heading",
                     )
                     if random.random() < 0.45:
                         bfs = max(cfg.detection.newspaper_font_size_range[0], int(hfs * 0.55))
@@ -576,7 +1609,10 @@ class PageGenerator:
                 else:  # body paragraph
                     font_size = random.randint(*cfg.detection.newspaper_font_size_range)
                     bold_width = self._maybe_bold(font_size)
-                    style = self._style_at(page, cx0, cy, col_w, font_size * 2, bold_width)
+                    body_lines = random.randint(5, 16)
+                    style = self._style_at(
+                        page, cx0, cy, col_w, font_size * 2, bold_width, extent=font_size * 1.4 * body_lines
+                    )
                     cy = self._fill_box(
                         page,
                         (cx0, cy, cx1, by1),
@@ -586,11 +1622,251 @@ class PageGenerator:
                         style,
                         bold_width,
                         rtl,
-                        max_lines=random.randint(5, 16),
+                        max_lines=body_lines,
                         line_spacing=spacing,
                     )
                     gap = font_size
                 cy += int(gap * random.uniform(0.2, 0.5))
+
+    def _layout_table(self, page, area, take_word, rtl, polygons) -> None:
+        """A ruled or unruled data table: header row, text and numeric columns.
+
+        Invoices, statements and reports are largely this shape, and the
+        label/value ``form`` layout does not cover it: a table has a header row,
+        aligned columns and *right-aligned* numeric cells, which puts word boxes
+        in a very different place on the line.
+        """
+        cfg = self.config.detection
+        bx0, by0, bx1, by1 = area
+        y = by0
+        # A real statement or invoice is table *blocks* separated by notes, not
+        # one table and two thirds of blank paper.
+        for block in range(6):
+            if by1 - y < self.config.detection.font_size_range[0] * 6:
+                break
+            if block == 0 or random.random() < 0.7:  # caption above the block
+                tfs = int(random.randint(*cfg.font_size_range) * random.uniform(1.2, 1.7))
+                tbw = self._heading_bold(tfs)
+                tstyle = self._style_at(page, bx0, y, bx1 - bx0, tfs * 2, tbw)
+                y = self._fill_box(
+                    page, (bx0, y, bx1, by1), take_word, polygons, tfs, tstyle, tbw, rtl, max_lines=1, role="heading"
+                )
+                y += int(tfs * 0.5)
+            y = self._draw_table_block(page, (bx0, y, bx1, by1), take_word, rtl, polygons)
+            y += int(cfg.font_size_range[0] * random.uniform(1.0, 2.2))
+            if random.random() < 0.45 and by1 - y > cfg.font_size_range[1] * 4:  # terms / notes
+                nfs = self._body_font()
+                nstyle = self._style_at(page, bx0, y, bx1 - bx0, nfs * 2, 0)
+                y = self._fill_box(
+                    page, (bx0, y, bx1, by1), take_word, polygons, nfs, nstyle, 0, rtl, max_lines=random.randint(2, 5)
+                )
+                y += int(nfs * random.uniform(0.8, 1.8))
+
+    def _draw_table_block(self, page, box, take_word, rtl, polygons) -> int:
+        """Draw one ruled/zebra table and return the y it reached."""
+        cfg = self.config.detection
+        bx0, by0, bx1, by1 = box
+        draw = ImageDraw.Draw(page)
+        rule = (120, 122, 132)
+        y = by0
+
+        font_size = self._body_font(fine_print=random.random() < self.config.detection.fine_print_prob * 0.6)
+        row_h = int(font_size * random.uniform(1.8, 2.4))
+        # Pick a column count the page can actually carry: a numeric cell needs
+        # roughly 6.5 glyph widths, so drop columns until the narrowest one fits
+        # type at the configured floor. Shrinking the font instead is what made
+        # dense tables unreadable.
+        lo, hi = cfg.table_columns_range
+        min_font = self._min_font()
+        ncols = random.randint(lo, hi)
+        while ncols > 2:
+            weights = [2.3] + [1.05] * (ncols - 1)
+            narrow = (bx1 - bx0) * min(weights) / sum(weights)
+            if narrow >= min_font * 6.5:
+                break
+            ncols -= 1
+
+        # The first column carries labels and is wider; the rest are numeric.
+        weights = [random.uniform(1.8, 2.8)] + [random.uniform(0.8, 1.3) for _ in range(ncols - 1)]
+        total = sum(weights)
+        edges, acc = [bx0], bx0
+        for weight in weights:
+            acc += (bx1 - bx0) * weight / total
+            edges.append(acc)
+
+        # Columns are laid out first, then the type is sized to the narrowest of
+        # them: a table whose font is chosen up front produces unreadable cells
+        # as soon as the column count goes up.
+        narrowest = min(edges[i + 1] - edges[i] for i in range(1, ncols)) if ncols > 1 else (bx1 - bx0)
+        font_size = max(min_font, min(font_size, int(narrowest / 6.5)))
+        row_h = max(int(font_size * 1.8), min(row_h, int(font_size * 2.6)))
+
+        ruled = random.random() < cfg.table_prob_ruled
+        zebra = random.random() < cfg.table_zebra_prob
+        nrows = random.randint(*cfg.table_rows_range)
+        header_y = y
+
+        for row in range(nrows + 1):
+            if y + row_h > by1:
+                break
+            is_header = row == 0
+            if is_header:
+                draw.rectangle((bx0, y, bx1, y + row_h), fill=(226, 229, 236))
+            elif zebra and row % 2 == 0:
+                draw.rectangle((bx0, y, bx1, y + row_h), fill=(240, 241, 246))
+
+            bold = self._heading_bold(font_size) if is_header else self._maybe_bold(font_size)
+            pad = max(3, int(font_size * 0.35))
+            for col in range(ncols):
+                cx0, cx1 = edges[col] + pad, edges[col + 1] - pad
+                if cx1 - cx0 < font_size:
+                    continue
+                style = self._style_at(page, cx0, y, cx1 - cx0, font_size * 2, bold)
+                cell_y = y + int((row_h - font_size * 1.2) / 2)
+                if col > 0 and not is_header:
+                    # Numeric cells are right-aligned, like every real ledger.
+                    # Several candidates are tried so a long value (a formatted
+                    # currency amount) never overflows into the column beside it.
+                    for _ in range(4):
+                        value = self._numeric_cell()
+                        if self._place_token(
+                            page,
+                            value,
+                            cx1,
+                            cell_y,
+                            font_size,
+                            style,
+                            bold,
+                            polygons,
+                            align_right=True,
+                            max_width=cx1 - cx0,
+                        ):
+                            break
+                else:
+                    self._fill_box(
+                        page,
+                        (cx0, cell_y, cx1, y + row_h),
+                        take_word,
+                        polygons,
+                        font_size,
+                        style,
+                        bold,
+                        rtl,
+                        max_lines=1,
+                        role="heading" if is_header else "body",
+                    )
+            if ruled:
+                draw.line((bx0, y + row_h, bx1, y + row_h), fill=(190, 192, 200), width=1)
+            y += row_h
+
+        if ruled:
+            draw.rectangle((bx0, header_y, bx1, y), outline=rule, width=1)
+            for edge in edges[1:-1]:
+                draw.line((edge, header_y, edge, y), fill=(190, 192, 200), width=1)
+            draw.line((bx0, header_y + row_h, bx1, header_y + row_h), fill=rule, width=2)
+        return y
+
+    @staticmethod
+    def _numeric_cell() -> str:
+        """A plausible numeric cell: amount, percentage, count, date or code."""
+        kind = random.random()
+        if kind < 0.45:
+            value = f"{random.uniform(0.5, 99999):,.2f}"
+            symbol = random.choice(["", "", "", "$", "EUR ", "GBP "])
+            return f"{symbol}{value}" if symbol else value
+        if kind < 0.6:
+            return f"{random.uniform(0, 100):.1f}%"
+        if kind < 0.75:
+            return str(random.randint(1, 9999))
+        if kind < 0.9:
+            return f"{random.randint(1, 28):02d}.{random.randint(1, 12):02d}.{random.randint(2015, 2026)}"
+        return f"{random.choice('ABCDEFGHJKLMNPQRSTUVWXYZ')}{random.randint(1000, 99999)}"
+
+    def _layout_receipt(self, page, area, take_word, rtl, polygons) -> None:
+        """A thermal receipt: centred header, item/price rows, dotted separators.
+
+        Rendered on the narrow page geometry from :meth:`_page_size`, since the
+        aspect ratio is as recognisable as the content.
+        """
+        cfg = self.config.detection
+        bx0, by0, bx1, by1 = area
+        draw = ImageDraw.Draw(page)
+        width = bx1 - bx0
+        font_size = max(self._min_font(), min(int(width / 22), cfg.font_size_range[1]))
+        y = by0
+
+        separator_char = random.choice("=-*._")
+
+        def separator(yy: int) -> int:
+            # Thermal printers print their rules as a row of characters. They look
+            # exactly like text, and real annotations (CORD) leave them unlabelled -
+            # so they are drawn here without a box: the detector must learn that a
+            # row of '=' is a rule, not a word.
+            if random.random() < 0.5:
+                row = self._render_word(separator_char * 60, font_size, 0, "body")
+                if row is not None:
+                    row = row.crop((0, 0, min(row.width, bx1 - bx0), row.height))
+                    style = self._style_at(page, bx0, yy, width, font_size * 2, 0)
+                    page.alpha_composite(recolor_coverage(row, style), (bx0, int(yy + row.info.get("ink_top", 0))))
+                    return yy + int(font_size * 1.2)
+            dash, gap = max(3, font_size // 2), max(2, font_size // 3)
+            x = bx0
+            while x < bx1:
+                draw.line((x, yy, min(x + dash, bx1), yy), fill=(120, 120, 128), width=1)
+                x += dash + gap
+            return yy + int(font_size * 0.9)
+
+        # Centred store header, progressively smaller.
+        for scale, weight in ((random.uniform(1.8, 2.4), True), (1.0, False), (1.0, False)):
+            fs = max(self._min_font(), int(font_size * scale))
+            bold = self._heading_bold(fs) if weight else 0
+            token = take_word().upper() if weight else take_word()
+            style = self._style_at(page, bx0, y, width, fs * 2, bold)
+            coverage = self._render_word(token, fs, bold, "heading" if weight else "body")
+            if coverage is not None:
+                self._emit(page, coverage, style, bx0 + (width - coverage.width) / 2, y, polygons)
+            y += int(fs * 1.5)
+        y = separator(y)
+
+        # Item rows: description left, price right.
+        style = self._style_at(page, bx0, y, width, by1 - y, 0)
+        row_h = int(font_size * 1.6)
+        while y + row_h < by1 - font_size * 8:
+            if random.random() < 0.08:
+                y = separator(y)
+                continue
+            price = f"{random.uniform(0.5, 249):.2f}"
+            self._place_token(page, price, bx1, y, font_size, style, 0, polygons, align_right=True)
+            self._fill_box(
+                page,
+                (bx0, y, bx1 - int(width * 0.3), y + row_h),
+                take_word,
+                polygons,
+                font_size,
+                style,
+                0,
+                rtl,
+                max_lines=1,
+            )
+            y += row_h
+
+        y = separator(y)
+        # Totals, then a hand-signed line on card receipts.
+        for label_scale in (1.25, 1.0):
+            fs = max(self._min_font(), int(font_size * label_scale))
+            bold = self._heading_bold(fs) if label_scale > 1 else 0
+            tstyle = self._style_at(page, bx0, y, width, fs * 2, bold)
+            self._place_token(page, take_word().upper(), bx0, y, fs, tstyle, bold, polygons)
+            self._place_token(
+                page, f"{random.uniform(5, 999):.2f}", bx1, y, fs, tstyle, bold, polygons, align_right=True
+            )
+            y += int(fs * 1.7)
+
+        if random.random() < cfg.handwriting_prob and y + font_size * 3 < by1:
+            hstyle = self._style_at(page, bx0, y, width, font_size * 2, 0)
+            self._write_by_hand(
+                page, (bx0, y + font_size, bx1, y + font_size * 3), take_word, polygons, font_size, hstyle
+            )
 
     def _layout_form(self, page, area, take_word, rtl, polygons) -> None:
         bx0, by0, bx1, by1 = area
@@ -601,7 +1877,9 @@ class PageGenerator:
         tfs = int(random.randint(*self.config.detection.font_size_range) * random.uniform(1.6, 2.2))
         tbw = self._heading_bold(tfs)
         tstyle = self._style_at(page, bx0, y, bx1 - bx0, tfs * 2, tbw)
-        y = self._fill_box(page, (bx0, y, bx1, by1), take_word, polygons, tfs, tstyle, tbw, rtl, max_lines=1)
+        y = self._fill_box(
+            page, (bx0, y, bx1, by1), take_word, polygons, tfs, tstyle, tbw, rtl, max_lines=1, role="heading"
+        )
         y += int(tfs * 0.35)
         draw.line((bx0, y, bx1, y), fill=ink, width=2)
         y += int(tfs * 0.5)
@@ -632,6 +1910,7 @@ class PageGenerator:
                     sbw,
                     rtl,
                     max_lines=1,
+                    role="heading",
                 )
                 y += bar_h + int(font_size * 0.4)
                 continue
@@ -666,7 +1945,13 @@ class PageGenerator:
                 vbox = (bx0 + label_col, y, bx1, y + row_h)
                 fx0, fx1 = bx0 + label_col, bx1
             vstyle = self._style_at(page, vbox[0], y, vbox[2] - vbox[0], font_size * 2, 0)
-            self._fill_box(page, vbox, take_word, polygons, font_size, vstyle, 0, rtl, max_lines=1)
+            # Printed label, hand-written value - how a filled-in form actually
+            # looks. Falls back to print when no handwriting face covers the text.
+            written = False
+            if random.random() < self.config.detection.handwriting_prob:
+                written = self._write_by_hand(page, vbox, take_word, polygons, font_size, vstyle)
+            if not written:
+                self._fill_box(page, vbox, take_word, polygons, font_size, vstyle, 0, rtl, max_lines=1)
             if boxed:
                 draw.rectangle(
                     (fx0, y - int(font_size * 0.2), fx1, y + int(font_size * 1.5)), outline=(150, 150, 165), width=1
@@ -691,6 +1976,8 @@ class PageGenerator:
         draw.rounded_rectangle(
             (cx0, cy0, cx1, cy1), radius=radius, fill=(tone, tone, max(0, tone - 6)), outline=(140, 145, 160), width=2
         )
+        if random.random() < 0.7:
+            self._guilloche(page, (cx0, cy0, cx1, cy1), radius)
         pad = int(card_h * 0.07)
 
         # Optional vertical side band, as printed on many residence permits and
@@ -716,14 +2003,14 @@ class PageGenerator:
         ex = (cx1 - pad - em) if rtl else (cx0 + pad)
         ey = cy0 + (band_h - em) // 2
         draw.ellipse((ex, ey, ex + em, ey + em), fill=(tone, tone, tone), outline=(205, 205, 215))
-        tfs = max(11, int(band_h * 0.42))
+        tfs = max(self._min_font(), int(band_h * 0.42))
         tbw = self._heading_bold(tfs)
         if rtl:
             tbox = (cx0 + pad, cy0 + (band_h - tfs) // 2, ex - pad, cy0 + band_h)
         else:
             tbox = (ex + em + pad, cy0 + (band_h - tfs) // 2, cx1 - pad, cy0 + band_h)
         tstyle = self._style_at(page, tbox[0], tbox[1], tbox[2] - tbox[0], tfs * 1.6, tbw)
-        self._fill_box(page, tbox, take_word, polygons, tfs, tstyle, tbw, rtl, max_lines=1)
+        self._fill_box(page, tbox, take_word, polygons, tfs, tstyle, tbw, rtl, max_lines=1, role="heading")
 
         if side_band is not None:
             sx0, sx1 = side_band
@@ -734,16 +2021,17 @@ class PageGenerator:
         photo_w = int(card_w * 0.24)
         photo_h = int((cy1 - body_top) * 0.6)
         px0 = (cx1 - pad - photo_w) if rtl else (cx0 + pad)
-        draw.rectangle(
-            (px0, body_top, px0 + photo_w, body_top + photo_h), fill=(200, 202, 210), outline=(150, 150, 162)
-        )
+        if random.random() < 0.3:  # contact chip instead of the portrait (the back of an eID)
+            self._chip(draw, (px0, body_top, px0 + int(photo_w * 0.8), body_top + int(photo_w * 0.65)))
+        else:
+            self._portrait(page, (px0, body_top, px0 + photo_w, body_top + photo_h))
 
         # Field rows beside the photo, reserving space for a signature + MRZ.
         if rtl:
             fx0, fx1 = cx0 + pad, px0 - pad
         else:
             fx0, fx1 = px0 + photo_w + pad, cx1 - pad
-        fs = max(11, int(card_h * 0.062))
+        fs = max(self._min_font(), int(card_h * 0.062))
         label_col = int((fx1 - fx0) * 0.42)
         mrz_reserve = int(fs * 2.6)
         sig_reserve = int(fs * 1.6)
@@ -760,7 +2048,11 @@ class PageGenerator:
                 self._place_token(page, label, fx0, fy, fs, lstyle, lbw, polygons)
                 vbox = (fx0 + label_col, fy, fx1, fy + int(fs * 1.7))
             vstyle = self._style_at(page, vbox[0], fy, vbox[2] - vbox[0], fs * 2, 0)
-            self._fill_box(page, vbox, take_word, polygons, fs, vstyle, 0, rtl, max_lines=1)
+            written = False
+            if random.random() < self.config.detection.handwriting_prob * 0.5:
+                written = self._write_by_hand(page, vbox, take_word, polygons, fs, vstyle)
+            if not written:
+                self._fill_box(page, vbox, take_word, polygons, fs, vstyle, 0, rtl, max_lines=1)
             fy += int(fs * 1.95)
 
         # Signature line above the MRZ.
@@ -768,14 +2060,22 @@ class PageGenerator:
         draw.line((fx0, sy, fx0 + int((fx1 - fx0) * 0.5), sy), fill=(120, 120, 135), width=1)
 
         # MRZ block at the bottom, sized to fit the card width.
-        mfs = max(10, int(card_h * 0.07))
+        mfs = max(self._min_font(), int(card_h * 0.07))
         avail = cx1 - cx0 - 2 * pad
         n_chars = max(12, int(avail / (mfs * 0.62)))
         my = cy1 - pad - int(mfs * 2.4)
         mstyle = self._style_at(page, cx0 + pad, my, avail, mfs * 2, 0)
         for _ in range(2):
-            mrz = "".join(random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<<<<") for _ in range(n_chars))
-            self._place_token(page, mrz, cx0 + pad, my, mfs, mstyle, 0, polygons)
+            # 0.62 em is a guess at the face's advance; a wider face would run the
+            # line past the card edge, so shorten it until it fits.
+            for _attempt in range(4):
+                mrz = "".join(random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<<<<") for _ in range(n_chars))
+                if self._place_token(page, mrz, cx0 + pad, my, mfs, mstyle, 0, polygons, max_width=avail):
+                    break
+                probe = self._render_word(mrz, mfs, 0)
+                if probe is None:
+                    break
+                n_chars = max(8, int(n_chars * avail / probe.width * 0.97))
             my += int(mfs * 1.15)
 
     @staticmethod
@@ -801,6 +2101,36 @@ class PageGenerator:
             return False
         rtl = sum(1 for w in sample if any(char_is_rtl(ord(c)) for c in w))
         return rtl > len(sample) / 2
+
+    def _calm_background(self, page: Image.Image) -> Image.Image:
+        """Tame a texture photo down to something text can sit on.
+
+        A document is ink on paper: the paper may be textured, but the texture is
+        low-amplitude next to the ink. A photo of crumpled fabric or wood grain
+        has structure at the same scale and amplitude as the glyphs, and swallows
+        them - contrast alone cannot rescue text competing with detail its own
+        size.
+
+        The large-scale look (colour, shading, vignetting) is kept; only the fine
+        detail is compressed, to a residual standard deviation of
+        ``detection.background_texture_std``.
+        """
+        target = self.config.detection.background_texture_std
+        if target <= 0:
+            return page
+        rgb = page.convert("RGB")
+        arr = np.asarray(rgb, dtype=np.float32)
+        # Everything the glyphs have to compete with lives above this scale.
+        radius = max(2.0, min(page.width, page.height) / 90.0)
+        smooth = np.asarray(rgb.filter(ImageFilter.GaussianBlur(radius)), dtype=np.float32)
+        residual = arr - smooth
+        std = float(residual.std())
+        if std <= target:
+            return page
+        calmed = smooth + residual * (target / std)
+        out = Image.fromarray(np.clip(calmed, 0, 255).astype(np.uint8), mode="RGB").convert("RGBA")
+        out.putalpha(page.getchannel("A"))
+        return out
 
     @staticmethod
     def _paper_background(size: tuple[int, int]) -> Image.Image:
@@ -829,11 +2159,14 @@ class PageGenerator:
     def _rotate(page: Image.Image, polygons: list[Polygon], angle: float) -> tuple[Image.Image, list[Polygon]]:
         """Rotate the page and its polygons together about the page centre."""
         width, height = page.size
+        # The corners a skewed scan uncovers show the scanner lid: usually white,
+        # often grey or black (document feeders, a lid left open).
+        lid = random.choices([255, random.randint(175, 225), random.randint(15, 60)], weights=[0.6, 0.15, 0.25])[0]
         rotated = page.rotate(
             angle,
             expand=True,
-            resample=Image.BICUBIC,  # type: ignore[attr-defined]
-            fillcolor=(255, 255, 255),
+            resample=Image.Resampling.BICUBIC,
+            fillcolor=(lid, lid, lid),
         )
         new_w, new_h = rotated.size
         cx, cy = width / 2.0, height / 2.0

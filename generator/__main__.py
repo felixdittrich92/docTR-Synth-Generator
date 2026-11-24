@@ -41,13 +41,19 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--layout",
         metavar="NAME",
-        help="detection layout: mixed | paragraph | newspaper | form | id_card | vertical",
+        help="detection layout: mixed | paragraph | newspaper | form | id_card | vertical | table | receipt",
     )
     parser.add_argument(
         "--vertical-prob",
         type=float,
         metavar="P",
         help="detection: probability a horizontal page also carries vertical text (default: 0.3)",
+    )
+    parser.add_argument(
+        "--capture-prob",
+        type=float,
+        metavar="P",
+        help="detection: probability a page is rendered as a camera capture (default: 0.35)",
     )
     parser.add_argument("-w", "--workers", type=int, help="worker processes")
     parser.add_argument("--val-percent", type=float, help="validation fraction (default: 0.2)")
@@ -59,6 +65,8 @@ def main(argv: list[str] | None = None) -> None:
         overrides["det_layout"] = args.layout
     if args.vertical_prob is not None:
         overrides["det_vertical_prob"] = args.vertical_prob
+    if args.capture_prob is not None:
+        overrides["capture_prob"] = args.capture_prob
     if args.workers is not None:
         overrides["num_workers"] = args.workers
     if args.val_percent is not None:

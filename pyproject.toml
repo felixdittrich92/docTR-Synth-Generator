@@ -32,7 +32,9 @@ dependencies = [
     "fonttools>=4.50.0,<5.0.0",
     "numpy>=2.0.0,<3.0.0",
     "Pillow>=11.0.0",
-    "matplotlib>=3.7.0,<4.0.0",
+    # HarfBuzz shaping check: a word is only rendered with a face that draws it
+    # without tofu, dotted circles or empty glyphs (see components/shaping.py)
+    "uharfbuzz>=0.39.0",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +52,7 @@ dev = [
     "fonttools>=4.50.0,<5.0.0",
     "numpy>=2.0.0,<3.0.0",
     "Pillow>=11.0.0",
+    "uharfbuzz>=0.39.0",
     # testing
     "pytest>=5.3.2",
     "coverage[toml]>=4.5.4",
@@ -91,9 +94,9 @@ implicit_reexport = false
 [[tool.mypy.overrides]]
 module = [
 	"fontTools.*",
+    "uharfbuzz.*",
     "numpy.*",
     "PIL.*",
-    "matplotlib.*",
 ]
 ignore_missing_imports = true
 

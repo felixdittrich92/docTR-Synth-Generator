@@ -6,6 +6,7 @@
 import random
 import unicodedata
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from functools import lru_cache
 
 from .vocabs import VOCABS
@@ -17,6 +18,7 @@ __all__ = [
     "resolve_vocab_charset",
     "filter_in_vocab",
     "augment_words_for_coverage",
+    "is_large_script_char",
 ]
 
 # ISO 639-1 code -> VOCABS key (only mappings whose vocab actually exists).
@@ -145,7 +147,9 @@ def filter_in_vocab(words: list[str], charset: set[str] | None) -> list[str]:
     return [w for w in words if w and set(w) <= charset]
 
 
-_LARGE_SCRIPT_THRESHOLD = 400  # scripts bigger than this (CJK, Hangul) are left to the corpus
+_LARGE_SCRIPT_THRESHOLD = 400  # scripts bigger than this (CJK, Hangul) get their own, lower floor
+LARGE_SCRIPT_FLOOR = 5  # default per-character floor for those scripts
+_LARGE_SCRIPTS = {"CJK", "HANGUL"}  # name prefixes of ideographs and precomposed syllables
 
 
 @lru_cache(maxsize=4096)
@@ -163,6 +167,11 @@ def _script_of(char: str) -> str:
         name = unicodedata.name(char)
     except ValueError:
         return "COMMON"
+    if name.startswith("MODIFIER LETTER"):
+        # Modifier letters are written inside words of a host script (Uzbek oʻ/gʻ,
+        # Hawaiian ʻokina, Georgian ჼ). Treated as a script of their own they only
+        # ever pair with each other, which yields tokens like "ʻʼʻ".
+        return "GEORGIAN" if "GEORGIAN" in name else "LATIN"
     return name.split(" ", 1)[0]  # the first word of the name is the script/block
 
 
@@ -243,6 +252,13 @@ def _make_token(
     """
     script = _script_of(char)
     if script == "COMMON":
+        if unicodedata.category(char) == "No" and not char.isascii():
+            # A script's own number signs (Tamil ௰ 'ten', Ethiopic ፪, Odia fractions):
+            # alone or next to each other - never beside ASCII digits, which would
+            # mix two digit systems in one number.
+            block = unicodedata.name(char, "").split(" ", 1)[0]
+            kin = [c for c in script_base_letters.get(f"#{block}", []) if c != char]
+            return char + ("".join(rng.choice(kin) for _ in range(rng.randint(0, 2))) if kin else "")
         # Script-neutral symbol/digit/punctuation: emit standalone (optionally
         # with a few digits) so the renderer is free to pick whatever font covers
         # it, without dragging in letters of an unrelated script.
@@ -252,7 +268,9 @@ def _make_token(
     base_letters = [
         c
         for c in (script_base_letters.get(script, []) or _CARRIER.get(script, []))
-        if c not in _PREBASE_VOWELS  # never use a left-reordering vowel as filler
+        # Never scaffold with a left-reordering vowel or a modifier letter: "ʻʼʻ"
+        # is not a word in any orthography.
+        if c not in _PREBASE_VOWELS and unicodedata.category(c) != "Lm"
     ]
     if not base_letters:
         base_letters = _CARRIER.get(script, [])
@@ -288,7 +306,17 @@ def _make_token(
             if not bases:
                 break
             word = rng.choice(bases)
-            positions = [i for i, c in enumerate(word) if unicodedata.category(c).startswith("L")]
+            # After a letter that does not already carry a mark: a second matra
+            # or a mark wedged between a consonant and its virama is a broken
+            # cluster, which the shaper draws with a dotted circle.
+            positions = [
+                i
+                for i, c in enumerate(word)
+                if unicodedata.category(c).startswith("L")
+                and c not in _PREBASE_VOWELS
+                and (i + 1 == len(word) or not _is_mark(word[i + 1]))
+                and (i == 0 or not _is_virama(word[i - 1]))
+            ]
             if positions:
                 i = rng.choice(positions)
                 return (word[: i + 1] + char + word[i + 1 :])[:16]
@@ -316,6 +344,28 @@ def _make_token(
             tail = "".join(rng.choice(base_letters) for _ in range(rng.randint(1, 2)))
             return (char + tail)[:16]
         return ""
+    if unicodedata.category(char) == "Lm":
+        # Modifier letters (Uzbek oʻ, ʼ) follow a letter inside a real word.
+        for _ in range(6):
+            if not bases:
+                break
+            word = rng.choice(bases)
+            positions = [i for i, c in enumerate(word) if c.isalpha() and unicodedata.category(c) != "Lm"]
+            if positions:
+                i = rng.choice(positions)
+                return (word[: i + 1] + char + word[i + 1 :])[:16]
+        if base_letters:
+            return (rng.choice(base_letters) + char + rng.choice(base_letters))[:16]
+        return char  # no host letter at all (e.g. Japanese ー on its own script bucket)
+    if char.isupper() and char.lower() != char:
+        # A capital belongs at the start of a word ("Ổng"), not wedged inside one
+        # ("guichỔo"): replace the first letter of a real word, else lead a scaffold.
+        lower = [w for w in bases if w[:1].isalpha() and w[:1].islower()]
+        if lower and rng.random() < 0.8:
+            word = rng.choice(lower)
+            return (char + word[1:])[:16]
+        rest = [c for c in base_letters if c.islower()] or list(base_letters)
+        return (char + "".join(rng.choice(rest) for _ in range(rng.randint(0, 4))))[:16] if rest else char
     if bases and rng.random() < 0.6:
         word = rng.choice(bases)
         pos = rng.randint(0, len(word))
@@ -327,18 +377,28 @@ def _make_token(
     return char
 
 
+def is_large_script_char(char: str) -> bool:
+    """Whether ``char`` belongs to a script with thousands of characters (CJK ideographs, Hangul)."""
+    return _script_of(char) in _LARGE_SCRIPTS
+
+
 def augment_words_for_coverage(
     words: list[str],
     target_chars: set[str],
     min_count: int = 3,
     seed: int | None = None,
+    accept: Callable[[str], bool] | None = None,
+    large_min_count: int | None = None,
 ) -> tuple[list[str], int, int]:
     """Append synthetic tokens so every target character is well represented.
 
     Tokens are kept within a single script so they always render with one font.
-    Characters belonging to very large scripts (CJK ideographs, Hangul) are left
-    to the real corpus rather than synthesised, since exhaustive coverage there
-    is neither meaningful nor practical.
+    Characters of very large scripts (CJK ideographs, Hangul: thousands each) are
+    covered to their own, lower floor ``large_min_count`` (default
+    ``min(min_count, LARGE_SCRIPT_FLOOR)``): real words carrying them first, then
+    short runs of 2-4 under-represented characters of the script - so a rare
+    syllable such as '걁' is in the data at all, without a floor of thousands
+    per character bloating the dataset.
 
     Args:
         words (list[str]): The real word pool.
@@ -346,6 +406,10 @@ def augment_words_for_coverage(
             times across the returned list.
         min_count (int): Minimum occurrences required per target character.
         seed (int | None): Seed for reproducible token synthesis.
+        accept (Callable[[str], bool] | None): Optional gate for *synthesised*
+            tokens, e.g. "some font shapes this without a dotted circle". A
+            rejected token is redrawn; attested real words are never gated.
+        large_min_count (int | None): Floor for characters of very large scripts.
 
     Returns:
         tuple[list[str], int, int]: ``(augmented_words, n_tokens_added,
@@ -370,6 +434,10 @@ def augment_words_for_coverage(
             script_letters[script].append(char)
             if unicodedata.category(char).startswith("L"):
                 script_base_letters[script].append(char)
+        elif unicodedata.category(char) in ("No", "Nd") and not char.isascii():
+            # Native number signs of a block, keyed "#TAMIL" etc., so _make_token can
+            # pair one with its own kind (Ethiopic ፲ + ፪) instead of ASCII digits.
+            script_base_letters["#" + unicodedata.name(char, "").split(" ", 1)[0]].append(char)
     for table in (script_letters, script_base_letters):
         for script in table:
             table[script].sort()
@@ -390,7 +458,12 @@ def augment_words_for_coverage(
     # orthography). Prefer repeating those over synthesising; synthesis is then
     # only a fallback for characters genuinely absent from the corpus (rare
     # punctuation, currency, capitals in a lower-cased corpus, ...).
-    under_present = {c for c in target_chars if 0 < counts.get(c, 0) < min_count and _script_of(c) not in oversized}
+    large_floor = min(min_count, LARGE_SCRIPT_FLOOR if large_min_count is None else large_min_count)
+
+    def floor_of(c: str) -> int:
+        return large_floor if _script_of(c) in oversized else min_count
+
+    under_present = {c for c in target_chars if 0 < counts.get(c, 0) < floor_of(c)}
     real_with: dict[str, list[str]] = defaultdict(list)
     if under_present:
         for word in words:
@@ -403,7 +476,7 @@ def augment_words_for_coverage(
     deficient = 0
     for char in sorted(target_chars):
         if counts.get(char, 0) >= min_count or _script_of(char) in oversized:
-            continue
+            continue  # large scripts: below
         deficient += 1
         attested = real_with.get(char)
         attempts = 0
@@ -414,9 +487,35 @@ def augment_words_for_coverage(
                 token = rng.choice(attested)  # real, attested word - correct combinations
             else:
                 token = _make_token(char, script_words, script_base_letters, rng)
+                if token and accept is not None and not accept(token):
+                    continue  # malformed for this script (or unrenderable): draw another
             if not token:
                 break  # cannot place this character validly (no same-script base letter)
             extra.append(token)
             counts.update(token)  # a token may satisfy several characters at once
+
+    for script in sorted(oversized):
+        lacking = [c for c in sorted(script_letters[script]) if counts.get(c, 0) < large_floor]
+        deficient += len(lacking)
+        for char in lacking:  # attested words first
+            for word in rng.sample(real_with.get(char, []), min(len(real_with.get(char, [])), large_floor)):
+                if counts.get(char, 0) >= large_floor:
+                    break
+                extra.append(word)
+                counts.update(word)
+        for _ in range(large_floor):  # then runs of 2-4 still-lacking characters
+            lacking = [c for c in lacking if counts.get(c, 0) < large_floor]
+            if not lacking:
+                break
+            rng.shuffle(lacking)
+            i = 0
+            while i < len(lacking):
+                run = lacking[i : i + rng.randint(2, 4)]
+                i += len(run)
+                tokens = ["".join(run)] if accept is None or accept("".join(run)) else run
+                for token in tokens:
+                    if len(token) > 1 or accept is None or accept(token):
+                        extra.append(token)
+                        counts.update(token)
 
     return words + extra, len(extra), deficient

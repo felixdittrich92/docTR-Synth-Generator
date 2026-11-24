@@ -48,9 +48,13 @@ class TextRenderer:
 
     Args:
         config (GenerationConfig): Configuration for text rendering.
+        word_augmentations (bool): per-word rotation, perspective, ink dropout and
+            blur. Right for recognition crops, each its own capture; wrong on a page,
+            where one word blurred or tilted on its own next to crisp neighbours is
+            not something a scanner or camera produces.
     """
 
-    def __init__(self, config: GenerationConfig):
+    def __init__(self, config: GenerationConfig, word_augmentations: bool = True):
         self.config = config
         self.supersample = max(1, int(config.realism.supersample))
 
@@ -66,6 +70,9 @@ class TextRenderer:
             ),
             RandomBlur(radius_range=config.realism.blur_radius_range, prob=config.realism.blur_prob),
         ])
+        if not word_augmentations:
+            self.geometry_augs = AugmentationPipeline([])
+            self.detail_augs = AugmentationPipeline([])
 
         self._font_cache: OrderedDict[tuple[str, int], ImageFont.FreeTypeFont] = OrderedDict()
         self._font_cache_size = 128

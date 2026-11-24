@@ -16,7 +16,6 @@ from PIL import Image
 
 from .components.config import GenerationConfig
 from .components.generator import TextImageGenerator
-from .components.latex_generator import generate_latex_formulas, render_latex_image
 from .components.page_generator import PageGenerator
 from .components.vocab_coverage import LANGUAGE_TO_VOCAB, VOCAB_TO_LANGUAGE, resolve_vocab_charset
 from .components.vocabs import VOCABS
@@ -211,6 +210,16 @@ class _BaseSynthDataset:
     def collate_fn(samples):
         torch = _torch()
         images, targets = zip(*samples)
+        shapes = {tuple(img.shape) for img in images}
+        if len(shapes) > 1:
+            raise RuntimeError(
+                "Cannot batch pages of different sizes: "
+                f"{sorted(shapes)}. Detection pages vary in size by design (physical "
+                "formats, camera capture, delivery resampling). Either pass docTR's "
+                "Resize as sample_transforms, or pin the output size with "
+                "det_page_width_range/det_page_height_range, which also disables "
+                "capture and the delivery resample."
+            )
         return torch.stack(list(images), dim=0), list(targets)
 
 
@@ -264,46 +273,6 @@ class SyntheticRecognitionDataset(_BaseSynthDataset):
 
     def _render(self, index: int) -> tuple[Image.Image, str]:
         return render_recognition_sample(self._generator, self.pool, max_attempts=self.max_attempts)
-
-
-class SyntheticLatexDataset(_BaseSynthDataset):
-    """On-the-fly LaTeX formula recognition dataset.
-
-    Each sample is a rendered math formula (Matplotlib mathtext - no system TeX)
-    whose label is the LaTeX *source* string. Train against ``VOCABS["latex"]``.
-
-    Args:
-        formulas: validated LaTeX source strings to sample from.
-        num_samples: virtual epoch length (``len(dataset)``).
-        fontsize_range: random font size per sample.
-        img_transforms / sample_transforms: docTR transforms, as elsewhere.
-        seed: ``None`` -> fresh every access (train); int -> reproducible (val).
-    """
-
-    def __init__(
-        self,
-        formulas: list[str],
-        num_samples: int,
-        *,
-        fontsize_range: tuple[int, int] = (16, 30),
-        img_transforms: Callable | None = None,
-        sample_transforms: Callable | None = None,
-        seed: int | None = None,
-    ) -> None:
-        super().__init__(num_samples, img_transforms=img_transforms, sample_transforms=sample_transforms, seed=seed)
-        if not formulas:
-            raise ValueError("latex formula pool is empty")
-        self.formulas = list(formulas)
-        self.fontsize_range = fontsize_range
-        self.charset = set(VOCABS["latex"])
-
-    def _render(self, index: int) -> tuple[Image.Image, str]:
-        formula = random.choice(self.formulas)
-        fontsize = random.randint(*self.fontsize_range)
-        rgba = render_latex_image(formula, fontsize=fontsize)
-        background = Image.new("RGB", rgba.size, (255, 255, 255))
-        background.paste(rgba, (0, 0), rgba.getchannel("A"))
-        return background, formula
 
 
 class SyntheticDetectionDataset(_BaseSynthDataset):
@@ -412,10 +381,7 @@ def build_recognition_datasets(
     train_samples: int | None = None,
     val_samples: int | None = None,
     val_seed: int = 1234,
-) -> (
-    tuple[SyntheticRecognitionDataset, SyntheticRecognitionDataset]
-    | tuple[SyntheticLatexDataset, SyntheticLatexDataset]
-):
+) -> tuple[SyntheticRecognitionDataset, SyntheticRecognitionDataset]:
     """Build ``(train, val)`` on-the-fly recognition datasets from a config.
 
     Sizes come straight from the config: ``num_images`` total, split into
@@ -437,16 +403,6 @@ def build_recognition_datasets(
     with no matching corpus at all, like ``"khmer"`` or ``"odia"`` - is covered
     by synthesised tokens instead of failing.
     """
-    # LaTeX is rendered math, not font-drawn words - route to its own builder.
-    if vocab is not None and (vocab == "latex" or vocab == ["latex"]):
-        return build_latex_recognition_datasets(
-            config,
-            img_transforms=img_transforms,
-            sample_transforms=sample_transforms,
-            train_samples=train_samples,
-            val_samples=val_samples,
-            val_seed=val_seed,
-        )
     if languages is not None:
         langs = _to_corpus_languages(languages)
     elif vocab is not None:
@@ -476,49 +432,6 @@ def build_recognition_datasets(
         config,
         val_n,
         vocab=vocab,
-        img_transforms=img_transforms,
-        sample_transforms=sample_transforms,
-        seed=val_seed,
-    )
-    return train_set, val_set
-
-
-def build_latex_recognition_datasets(
-    config: GenerationConfig,
-    *,
-    img_transforms: Callable | None = None,
-    sample_transforms: Callable | None = None,
-    train_samples: int | None = None,
-    val_samples: int | None = None,
-    val_seed: int = 1234,
-    max_depth: int = 3,
-    pool_size: int = 3000,
-) -> tuple[SyntheticLatexDataset, SyntheticLatexDataset]:
-    """Build ``(train, val)`` LaTeX-formula recognition datasets.
-
-    Labels are valid LaTeX source strings; images are the rendered math. Sizes
-    come from the config (``num_images`` split by ``val_percent``), exactly like
-    :func:`build_recognition_datasets`. Train against ``VOCABS["latex"]``.
-    A disjoint pool of ``pool_size`` formulas is generated once and split so the
-    train and val formulas never overlap.
-    """
-    train_n, val_n = _split_sizes(config, train_samples, val_samples)
-    formulas = generate_latex_formulas(pool_size, seed=config.corpus.seed, max_depth=max_depth)
-    if not formulas:
-        raise ValueError("could not generate any valid LaTeX formulas")
-    cut = max(1, int(len(formulas) * (1 - config.core.val_percent)))
-    train_pool = formulas[:cut]
-    val_pool = formulas[cut:] or formulas[:1]
-    train_set = SyntheticLatexDataset(
-        train_pool,
-        train_n,
-        img_transforms=img_transforms,
-        sample_transforms=sample_transforms,
-        seed=None,
-    )
-    val_set = SyntheticLatexDataset(
-        val_pool,
-        val_n,
         img_transforms=img_transforms,
         sample_transforms=sample_transforms,
         seed=val_seed,

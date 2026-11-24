@@ -63,3 +63,18 @@ def test_failed_download_is_cached_and_not_retried(monkeypatch):
     second = fd._download("notosans", "NotoSans[wght].ttf")
     assert first is None and second is None
     assert attempts["n"] == 1  # second call short-circuits via the negative cache
+
+
+def test_handwriting_faces_fetch_every_family_once(monkeypatch, tiny_font):
+    from generator.components.font_downloader import _HANDWRITING_FONTS
+
+    fd = FontDownloader(cache_dir=tempfile.mkdtemp(), enabled=True)
+    asked = []
+    monkeypatch.setattr(fd, "_download", lambda family, filename: asked.append(family) or tiny_font)
+    faces = fd.handwriting_faces("latin")
+    assert len(faces) == len(_HANDWRITING_FONTS["latin"]) >= 10  # many writers, not one
+    assert asked == [family for family, _ in _HANDWRITING_FONTS["latin"]]
+    assert FontDownloader(cache_dir=tempfile.mkdtemp(), enabled=False).handwriting_faces("latin") == []
+    scripts = ("cyrillic", "greek", "arabic", "hebrew", "thai", "devanagari", "bengali", "cjk", "japanese", "korean")
+    for script in scripts:
+        assert _HANDWRITING_FONTS[script], script

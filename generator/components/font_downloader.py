@@ -92,6 +92,87 @@ _SCRIPT_FONTS: dict[str, list[tuple[str, list[str]]]] = {
     "cjk": [("notosanssc", ["NotoSansSC[wght].ttf"])],
 }
 
+# Handwriting faces, for form values and annotations that a person filled in by
+# hand. Latin and Devanagari only - Google Fonts has no reliable handwriting
+# coverage for most other scripts, and the caller falls back to a printed face.
+# Every filename here was verified against google/fonts. Guessed alternates are
+# deliberately absent: an unverified fallback is only ever tried after the real
+# file has failed, so it cannot rescue anything and guarantees a 404 on the way.
+_HANDWRITING_FONTS: dict[str, list[tuple[str, list[str]]]] = {
+    # Everyday hands - neat print, rushed print, joined script - rather than
+    # display "fun" faces: filled-in forms, waybills and margin notes.
+    "latin": [
+        ("caveat", ["Caveat[wght].ttf"]),
+        ("indieflower", ["IndieFlower-Regular.ttf"]),
+        ("shadowsintolight", ["ShadowsIntoLight.ttf"]),
+        ("architectsdaughter", ["ArchitectsDaughter-Regular.ttf"]),
+        ("patrickhand", ["PatrickHand-Regular.ttf"]),
+        ("reeniebeanie", ["ReenieBeanie.ttf"]),
+        ("nothingyoucoulddo", ["NothingYouCouldDo.ttf"]),
+        ("coveredbyyourgrace", ["CoveredByYourGrace.ttf"]),
+        ("kalam", ["Kalam-Regular.ttf"]),
+        ("dekko", ["Dekko-Regular.ttf"]),
+        ("gochihand", ["GochiHand-Regular.ttf"]),
+        ("handlee", ["Handlee-Regular.ttf"]),
+        ("playpensans", ["PlaypenSans[wght].ttf"]),
+    ],
+    "cyrillic": [
+        ("caveat", ["Caveat[wght].ttf"]),
+        ("badscript", ["BadScript-Regular.ttf"]),
+        ("marckscript", ["MarckScript-Regular.ttf"]),
+        ("neucha", ["Neucha.ttf"]),
+        ("pangolin", ["Pangolin-Regular.ttf"]),
+        ("playpensans", ["PlaypenSans[wght].ttf"]),
+    ],
+    "greek": [  # monotonic only: polytonic text stays printed
+        ("playpensans", ["PlaypenSans[wght].ttf"]),
+        ("kleeone", ["KleeOne-Regular.ttf"]),
+        ("zenkurenaido", ["ZenKurenaido-Regular.ttf"]),
+    ],
+    "arabic": [  # Ruqaa is the everyday Arabic hand
+        ("arefruqaa", ["ArefRuqaa-Regular.ttf"]),
+        ("playpensansarabic", ["PlaypenSansArabic[wght].ttf"]),
+    ],
+    "hebrew": [
+        ("playpensanshebrew", ["PlaypenSansHebrew[wght].ttf"]),
+        ("amaticsc", ["AmaticSC-Regular.ttf"]),
+    ],
+    "thai": [
+        ("itim", ["Itim-Regular.ttf"]),
+        ("sriracha", ["Sriracha-Regular.ttf"]),
+        ("mali", ["Mali-Regular.ttf"]),
+        ("charm", ["Charm-Regular.ttf"]),
+        ("playpensansthai", ["PlaypenSansThai[wght].ttf"]),
+    ],
+    "devanagari": [
+        ("kalam", ["Kalam-Regular.ttf"]),
+        ("playpensansdeva", ["PlaypenSansDeva[wght].ttf"]),
+    ],
+    "bengali": [
+        ("atma", ["Atma-Regular.ttf"]),
+        ("galada", ["Galada-Regular.ttf"]),
+    ],
+    "japanese": [
+        ("kleeone", ["KleeOne-Regular.ttf"]),
+        ("zenkurenaido", ["ZenKurenaido-Regular.ttf"]),
+        ("yomogi", ["Yomogi-Regular.ttf"]),
+    ],
+    "cjk": [  # Japanese faces cover jōyō kanji, Chinese ones simplified hanzi
+        ("kleeone", ["KleeOne-Regular.ttf"]),
+        ("zenkurenaido", ["ZenKurenaido-Regular.ttf"]),
+        ("yomogi", ["Yomogi-Regular.ttf"]),
+        ("mashanzheng", ["MaShanZheng-Regular.ttf"]),
+        ("longcang", ["LongCang-Regular.ttf"]),
+        ("zhimangxing", ["ZhiMangXing-Regular.ttf"]),
+    ],
+    "korean": [
+        ("nanumpenscript", ["NanumPenScript-Regular.ttf"]),
+        ("gaegu", ["Gaegu-Regular.ttf"]),
+        ("gamjaflower", ["GamjaFlower-Regular.ttf"]),
+        ("himelody", ["HiMelody-Regular.ttf"]),
+    ],
+}
+
 # A small, ordered fallback chain. Noto Sans (latin/greek/cyrillic) is tried
 # first because it covers the bulk of European text; CJK is the broadest net for
 # ideographic scripts.
@@ -207,6 +288,24 @@ class FontDownloader:
                 if path and self._covers(path, required_chars):
                     return path
         return None
+
+    def handwriting_faces(self, script: str) -> list[str]:
+        """Every handwriting face listed for ``script``, downloaded once and then cached.
+
+        Writers differ, so a crop picks among all of them rather than reusing
+        the first face that happened to be downloaded.
+        """
+        if not self.enabled:
+            return []
+        faces = []
+        for family, filenames in _HANDWRITING_FONTS.get(script, []):
+            for filename in filenames:
+                with _DOWNLOAD_LOCK:
+                    path = self._download(family, filename)
+                if path is not None:
+                    faces.append(path)
+                    break  # one file per family; further names would only 404
+        return faces
 
     def resolve(self, text: str) -> str | None:
         """Return a local font path that fully covers ``text``, downloading if needed.

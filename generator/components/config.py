@@ -18,6 +18,8 @@ __all__ = [
     "RecognitionConfig",
     "RealismConfig",
     "DetectionConfig",
+    "CaptureConfig",
+    "MediaConfig",
 ]
 
 
@@ -69,6 +71,13 @@ class ResourceConfig:
             filenames/URLs to use instead of the default set.
         bg_cache_size: number of decoded backgrounds kept in memory.
         bg_max_dimension: backgrounds larger than this are downscaled.
+        procedural_bg_prob: share of backgrounds that are generated magazine,
+            brochure and poster designs (colour fields, gradients, sidebars,
+            halftone, geometric artwork) instead of a background image.
+        verify_shaping: shape every word with HarfBuzz before using a font and
+            reject faces that would draw a tofu box, a dotted circle or an empty
+            glyph - the image then always shows exactly its label. Needs the
+            optional ``uharfbuzz`` package; a no-op without it.
     """
 
     wordlist_path: str | None = None
@@ -83,6 +92,8 @@ class ResourceConfig:
     background_manifest_url: str | None = None
     bg_cache_size: int = 50
     bg_max_dimension: int = 2000
+    procedural_bg_prob: float = 0.3
+    verify_shaping: bool = True
 
 
 @dataclass
@@ -94,7 +105,11 @@ class CorpusConfig:
         min_word_length / max_word_length: length bounds (characters).
         filter_by_script: drop words whose script doesn't match the language.
         casing_variant_prob: probability of adding a Title/UPPER variant per word.
-        numeric_token_ratio: fraction of the vocab filled with numbers/dates/codes.
+        numeric_token_ratio: fraction of the vocab filled with numbers, prices,
+            dates, codes, units, operators and standalone symbols. Frequency word
+            lists contain none of these, yet they are everywhere on invoices,
+            receipts, forms and IDs - 0.05 left currency symbols at roughly 0.5%
+            of the dataset. Note a restrictive ``charset`` filters them back out.
         seed: optional RNG seed for reproducible vocabularies.
     """
 
@@ -103,7 +118,7 @@ class CorpusConfig:
     max_word_length: int = 24
     filter_by_script: bool = True
     casing_variant_prob: float = 0.3
-    numeric_token_ratio: float = 0.05
+    numeric_token_ratio: float = 0.18
     seed: int | None = None
 
 
@@ -153,10 +168,21 @@ class RecognitionConfig:
     Attributes:
         font_size_range: range of font sizes for recognition crops.
         padding: padding (pixels) around the text in a crop.
+        margin_prob / margin_range: chance and size (as a share of the text height,
+            per side) of extra margin around the word. Crops in the wild come from
+            detector boxes, which are expanded around the ink and never sit exactly
+            on it.
+        context_prob: chance the margin carries what real crops pick up from the page
+            around a word - the cut-off descenders of the line above, the tops of the
+            line below, an underline or a table rule. Fragments always run off the
+            crop edge, so they cannot be read as extra characters.
     """
 
     font_size_range: tuple[int, int] = (12, 40)
     padding: int = 2
+    margin_prob: float = 0.7
+    margin_range: tuple[float, float] = (0.0, 0.3)
+    context_prob: float = 0.35
 
 
 @dataclass
@@ -169,6 +195,23 @@ class RealismConfig:
         ink_color_jitter: per-channel std-dev of ink colour jitter.
         colored_ink_prob: probability of colourful (vs near-neutral) ink.
         outline_prob / outline_width_frac_range: contrasting glyph outline.
+        page_contrast_bias: where in the contrast range a page's pinned ink is
+            drawn from (0 = anywhere, 1 = always max). Contrast is page-wide, so
+            a low draw fades the whole document rather than one block.
+        crop_texture_std: how much fine detail a background photo may keep behind
+            text. Structure at glyph scale camouflages strokes no matter what ink
+            is chosen; 0 disables the compression.
+        min_local_contrast: recognition crops are re-drawn (new background and ink)
+            until every part of the word clears this luminance gap over its local
+            paper, net of the paper's own texture (see
+            :func:`~generator.components.legibility.local_ink_contrast`). An
+            unreadable crop with a label is pure noise for a recogniser. 0 disables.
+        grayscale_prob / bitonal_prob: share of crops and pages delivered in grayscale
+            or black-and-white, as office scanners, copiers, fax machines and the
+            "B&W" mode of scanner apps produce them (see ``components/scan.py``).
+        min_ink_separation: guaranteed luminance separation between ink and paper
+            *after* opacity is applied. Contrast, hue scaling, jitter and opacity
+            each look reasonable alone and compound into invisible text.
         min_contrast / max_contrast: ink-vs-background contrast bounds [0, 1].
         invert_prob: probability of inverting polarity on mid-tone backgrounds.
         bold_prob / bold_width_frac_range: faux-bold probability and stroke width.
@@ -185,26 +228,32 @@ class RealismConfig:
     supersample: int = 3
     text_opacity_range: tuple[int, int] = (200, 255)
     ink_color_jitter: float = 12.0
-    colored_ink_prob: float = 0.25
+    colored_ink_prob: float = 0.12
     outline_prob: float = 0.05
     outline_width_frac_range: tuple[float, float] = (0.02, 0.045)
     min_contrast: float = 0.45
+    page_contrast_bias: float = 0.45
+    min_ink_separation: float = 62.0
+    crop_texture_std: float = 10.0
+    min_local_contrast: float = 30.0
+    grayscale_prob: float = 0.3
+    bitonal_prob: float = 0.08
     max_contrast: float = 0.95
     invert_prob: float = 0.15
     bold_prob: float = 0.3
     bold_width_frac_range: tuple[float, float] = (0.03, 0.06)
-    rotation_prob: float = 0.15
-    blur_prob: float = 0.2
+    rotation_prob: float = 0.05
+    blur_prob: float = 0.1
     perspective_prob: float = 0.2
     pixel_dropout_prob: float = 0.05
     rotation_range: tuple[float, float] = (-2, 2)
     blur_radius_range: tuple[float, float] = (0.3, 1.0)
     perspective_margin: int = 2
     pixel_dropout_range: tuple[float, float] = (0.1, 0.2)
-    final_blur_prob: float = 0.15
+    final_blur_prob: float = 0.1
     final_blur_radius_range: tuple[float, float] = (0.3, 1.2)
-    noise_prob: float = 0.2
-    noise_std_range: tuple[float, float] = (2.0, 12.0)
+    noise_prob: float = 0.1
+    noise_std_range: tuple[float, float] = (2.0, 8.0)
     jpeg_prob: float = 0.3
     jpeg_quality_range: tuple[int, int] = (35, 92)
     brightness_jitter: float = 0.12
@@ -222,7 +271,7 @@ class DetectionConfig:
         margin_ratio: page margin as a fraction of min(width, height).
         block_gap_range: gap between paragraph blocks (fraction of line height).
         layout: ``"mixed"`` (default), ``"paragraph"``, ``"newspaper"``,
-            ``"form"``, ``"id_card"`` or ``"vertical"``.
+            ``"form"``, ``"id_card"``, ``"vertical"``, ``"table"`` or ``"receipt"``.
         layout_weights: weights for the ``"mixed"`` blend.
         vertical_prob: probability that a *horizontal* page additionally carries
             a vertical text region (margin note, side banner, spine title). Set
@@ -240,13 +289,60 @@ class DetectionConfig:
             coloured banner (light ink on dark) rather than plain margin text.
         vertical_max_stacked_chars: words longer than this are skipped in stacked
             mode (a 20-glyph column rarely fits and never looks real).
+        vertical_word_gap_range: space between rotated words in a vertical column,
+            as a multiple of the font size. Stacked CJK columns stay tight.
         newspaper_columns_range / newspaper_font_size_range /
             newspaper_line_spacing_range: newspaper density controls.
         max_blocks: safety cap on paragraph blocks per page.
+        partial_page_prob / partial_page_fill_range: probability that a paragraph,
+            newspaper or table page ends part-way down (the last page of a letter or
+            report), and the share of the content height it then uses. Filling every
+            page to the bottom margin teaches a detector that text never stops.
         heading_prob: probability a block starts as a larger heading.
         plain_background_prob: probability of a clean generated paper background
             (texture photos may carry their own unlabelled text).
         rotation_prob / rotation_range: small global page rotation.
+        page_font_coherence: probability that a page pins one font per role
+            instead of re-picking a face for every word (0 = old behaviour).
+        heading_font_prob: probability headings get their own pinned face rather
+            than reusing the body face.
+        ink_deviation_prob: probability a block departs from the page ink - real
+            documents are near-monochrome with the occasional accent.
+        bleed_through_prob: probability that mirrored text from the reverse side
+            of the sheet shows through.
+        bleed_through_alpha_range / bleed_through_blur_range: strength and
+            softness of that show-through.
+        body_point_range: body type size in points, used when the physical media
+            model is enabled (see :class:`MediaConfig`).
+        heading_point_scale: heading size as a multiple of body type.
+        fine_print_prob: probability a block is set as fine print - footnotes,
+            legal small print, table footers.
+        fine_print_point_range: type size for those blocks, in points.
+        function_word_ratio: share of tokens drawn from the short-word bucket, so
+            lines alternate function and content words (0 = uniform sampling).
+        function_word_max_len: length bound of that bucket.
+        punctuation_prob: probability a token carries attached punctuation.
+        table_*: ruled/zebra table layout controls.
+        receipt_*: thermal-receipt layout controls (its page geometry overrides
+            ``page_*_range``, since a receipt is far narrower than any document).
+        handwriting_prob: probability a form/receipt value is written by hand.
+        furniture_prob: probability a page carries furniture - header/footer with
+            a page number, a stamp, a signature, a redaction bar, a logo.
+        punch_hole_prob: chance a text page carries two filing holes in its left margin.
+        picture_prob: chance a paragraph or newspaper page embeds a photo (unlabelled) with a caption.
+        crease_prob: chance the sheet is folded or crumpled; creases shade ink and paper alike
+            (receipts are crumpled more often).
+        stamp_prob / redaction_prob / signature_prob / logo_prob: the mix of
+            furniture, conditional on ``furniture_prob``.
+        edge_truncation_prob: probability a block bleeds past the margin so words
+            are clipped by the page edge.
+        background_texture_std: how much fine detail a texture background may
+            keep, as a residual standard deviation. Photo textures carry
+            structure at glyph scale and amplitude, which no amount of ink
+            contrast can overcome; 0 disables the compression.
+        background_scrim_std: above this luminance spread under a block, a
+            translucent panel is laid down first. One ink per block cannot suit a
+            background that runs bright to dark inside that block; 0 disables it.
     """
 
     page_width_range: tuple[int, int] = (700, 1100)
@@ -260,13 +356,15 @@ class DetectionConfig:
     newspaper_columns_range: tuple[int, int] = (3, 6)
     newspaper_font_size_range: tuple[int, int] = (9, 15)
     newspaper_line_spacing_range: tuple[float, float] = (1.05, 1.2)
-    max_blocks: int = 60
+    max_blocks: int = 48
+    partial_page_prob: float = 0.25
+    partial_page_fill_range: tuple[float, float] = (0.3, 0.8)
     heading_prob: float = 0.3
-    plain_background_prob: float = 0.4
-    rotation_prob: float = 0.15
+    plain_background_prob: float = 0.3
+    rotation_prob: float = 0.05
     rotation_range: tuple[float, float] = (-2.5, 2.5)
-    vertical_prob: float = 0.3
-    vertical_ccw_prob: float = 0.6
+    vertical_prob: float = 0.2
+    vertical_ccw_prob: float = 0.2
     vertical_stacked_prob: float = 0.2
     vertical_columns_range: tuple[int, int] = (4, 12)
     vertical_line_spacing_range: tuple[float, float] = (1.25, 1.7)
@@ -274,6 +372,141 @@ class DetectionConfig:
     vertical_region_width_range: tuple[float, float] = (0.06, 0.16)
     vertical_banner_prob: float = 0.35
     vertical_max_stacked_chars: int = 12
+    vertical_word_gap_range: tuple[float, float] = (0.4, 0.75)
+    page_font_coherence: float = 0.9
+    heading_font_prob: float = 0.5
+    ink_deviation_prob: float = 0.12
+    bleed_through_prob: float = 0.25
+    bleed_through_alpha_range: tuple[float, float] = (0.07, 0.22)
+    bleed_through_blur_range: tuple[float, float] = (0.5, 1.6)
+    body_point_range: tuple[float, float] = (8.5, 12.5)
+    heading_point_scale: tuple[float, float] = (1.35, 2.4)
+    fine_print_prob: float = 0.22
+    fine_print_point_range: tuple[float, float] = (5.0, 7.0)
+    function_word_ratio: float = 0.45
+    function_word_max_len: int = 4
+    punctuation_prob: float = 0.18
+    table_prob_ruled: float = 0.6
+    table_zebra_prob: float = 0.3
+    table_columns_range: tuple[int, int] = (3, 6)
+    table_rows_range: tuple[int, int] = (6, 22)
+    receipt_width_range: tuple[int, int] = (300, 460)
+    receipt_height_range: tuple[int, int] = (900, 1800)
+    handwriting_prob: float = 0.35
+    furniture_prob: float = 0.3
+    punch_hole_prob: float = 0.06
+    crease_prob: float = 0.2
+    picture_prob: float = 0.3
+    stamp_prob: float = 0.15
+    redaction_prob: float = 0.12
+    signature_prob: float = 0.2
+    logo_prob: float = 0.3
+    edge_truncation_prob: float = 0.15
+    background_texture_std: float = 14.0
+    background_scrim_std: float = 24.0
+
+
+@dataclass
+class CaptureConfig:
+    """Camera-capture simulation for detection pages (``task="detection"``).
+
+    Without this the page *is* the image: axis-aligned, edge to edge - a flatbed
+    scan. Real captures are a sheet photographed as an object in a scene, so the
+    page is warped, placed on a surface, lit unevenly and slightly out of focus.
+
+    Attributes:
+        prob: probability a page is turned into a photographed capture.
+        page_scale_range: fraction of the frame the page occupies.
+        perspective: corner jitter as a fraction of the short page side.
+        rotation_range: in-plane rotation of the sheet (degrees).
+        shadow_prob / shadow_offset_frac / shadow_blur_frac: drop shadow cast by
+            the sheet onto the surface.
+        illumination_prob / illumination_strength: low-frequency lighting falloff.
+        vignette_prob / vignette_strength: darkening toward the frame corners.
+        glare_prob / glare_strength: a specular highlight blob.
+        motion_blur_prob / motion_blur_length_range: directional camera shake.
+        min_contrast_factor: the least local contrast lighting may leave, as a
+            fraction of the original. Falloff and glare each scale contrast, and
+            the product is what erases text, so the pair is bounded together.
+        textured_surface_prob: chance the sheet lies on a procedural tablecloth, wooden
+            table or crumpled paper instead of a plain surface.
+        curl_prob / curl_strength_range: chance the sheet is bent (sagging, an edge
+            lifting, a gentle ripple) and the largest vertical displacement as a
+            share of the page height. Text lines then bow, as on any phone photo.
+        partial_shadow_prob: chance of a soft-edged shadow (hand, phone) across
+            part of the frame; bounded by ``min_contrast_factor`` like all lighting.
+        colour_cast_prob / colour_cast_strength: chance and size of a warm or cool
+            white-balance shift.
+        surface_tone_range: brightness range of the generated surface the sheet
+            rests on (a *generated* surface, never a photo, so no unlabelled
+            text can leak into the frame).
+    """
+
+    prob: float = 0.35
+    page_scale_range: tuple[float, float] = (0.72, 0.95)
+    perspective: float = 0.035
+    rotation_range: tuple[float, float] = (-4.0, 4.0)
+    shadow_prob: float = 0.8
+    shadow_offset_frac: float = 0.012
+    shadow_blur_frac: float = 0.01
+    illumination_prob: float = 0.7
+    illumination_strength: float = 0.28
+    vignette_prob: float = 0.5
+    vignette_strength: float = 0.35
+    glare_prob: float = 0.2
+    glare_strength: float = 0.35
+    motion_blur_prob: float = 0.15
+    motion_blur_length_range: tuple[int, int] = (3, 9)
+    surface_tone_range: tuple[int, int] = (55, 205)
+    curl_prob: float = 0.6
+    textured_surface_prob: float = 0.65
+    curl_strength_range: tuple[float, float] = (0.004, 0.02)
+    partial_shadow_prob: float = 0.25
+    colour_cast_prob: float = 0.6
+    colour_cast_strength: float = 0.07
+    min_contrast_factor: float = 0.68
+
+
+@dataclass
+class MediaConfig:
+    """Physical page model and delivery resample for detection pages.
+
+    With ``enabled`` the page stops being an arbitrary pixel rectangle: it is a
+    sheet of a real size, scanned at a real resolution, with type specified in
+    points. That is what makes dense small text possible - a 6pt footnote at
+    300 DPI is 25px, small relative to the page and still sharp - and it is why
+    ``detection.font_size_range`` becomes a safety clamp rather than the primary
+    control. Set ``enabled=False`` to size pages and type directly in pixels, as
+    before.
+
+    Attributes:
+        enabled: use the physical model (page size, DPI, points).
+        dpi_range: capture resolution the page is rendered at.
+        landscape_prob: probability a document format is rotated to landscape.
+        receipt_length_range: receipt roll length, in inches.
+        max_render_megapixels: cap on the rendered page; DPI is reduced rather
+            than the page size when a format would exceed it.
+        delivery_long_edge_range: long edge of the delivered image. Real images
+            are stored smaller than they were captured, and that downscale is
+            where they pick up their softening and aliasing.
+        resample_prob: probability the delivery resample is applied at all.
+        upscale_after_prob: probability the downscaled image is then blown back
+            up - a second generation, as anything that has been through a chat
+            app has had.
+        min_delivery_text_px: the smallest glyph height that must survive *in
+            the delivered image*. Replaces an absolute pixel floor: a page that
+            will be halved has to render its smallest type twice as large.
+    """
+
+    enabled: bool = True
+    dpi_range: tuple[float, float] = (150.0, 300.0)
+    landscape_prob: float = 0.14
+    receipt_length_range: tuple[float, float] = (5.0, 16.0)
+    max_render_megapixels: float = 3.6
+    delivery_long_edge_range: tuple[float, float] = (900.0, 2200.0)
+    resample_prob: float = 0.85
+    upscale_after_prob: float = 0.12
+    min_delivery_text_px: float = 7.0
 
 
 # Sub-config attribute name -> dataclass type.
@@ -286,7 +519,12 @@ _GROUP_TYPES = {
     "recognition": RecognitionConfig,
     "realism": RealismConfig,
     "detection": DetectionConfig,
+    "capture": CaptureConfig,
+    "media": MediaConfig,
 }
+
+# Groups whose flat keyword names carry a prefix to keep them unambiguous.
+_GROUP_PREFIXES = {"detection": "det_", "capture": "capture_", "media": "media_"}
 
 # Flat keyword name -> (sub-config attr, field name). Auto-built from the
 # dataclasses so it stays in sync; detection fields get a ``det_`` prefix and a
@@ -298,10 +536,8 @@ _FLAT_RENAMES = {
 _FLAT_MAP: dict[str, tuple[str, str]] = {}
 for _group, _type in _GROUP_TYPES.items():
     for _f in dataclasses.fields(_type):
-        if _group == "detection":
-            _flat = f"det_{_f.name}"
-        else:
-            _flat = _FLAT_RENAMES.get((_group, _f.name), _f.name)
+        _prefix = _GROUP_PREFIXES.get(_group)
+        _flat = f"{_prefix}{_f.name}" if _prefix else _FLAT_RENAMES.get((_group, _f.name), _f.name)
         _FLAT_MAP[_flat] = (_group, _f.name)
 
 
@@ -321,12 +557,38 @@ class GenerationConfig:
     recognition: RecognitionConfig = field(default_factory=RecognitionConfig)
     realism: RealismConfig = field(default_factory=RealismConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
+    capture: CaptureConfig = field(default_factory=CaptureConfig)
+    media: MediaConfig = field(default_factory=MediaConfig)
+    # Flat option names the caller passed to :meth:`flat`; empty when the config
+    # was built directly from sub-configs.
+    explicit_options: frozenset[str] = field(default_factory=frozenset)
+
+    def pins_page_size(self) -> bool:
+        """Whether the caller pinned the detection page dimensions.
+
+        The media model derives page size from a physical sheet and a DPI, but a
+        caller who set ``det_page_width_range``/``det_page_height_range`` wants
+        those pixels - for a fixed-size training batch, for instance. Silently
+        overriding them is the same class of bug as ignoring the font floor.
+        """
+        if {"det_receipt_width_range", "det_receipt_height_range"} & self.explicit_options:
+            return False  # a pinned receipt roll is its own, more specific pin
+        return bool({"det_page_width_range", "det_page_height_range"} & self.explicit_options)
 
     def __post_init__(self):
         # With neither a wordlist nor explicit languages, default to English so a
         # bare config "just works" without any local resources.
         if self.resources.wordlist_path is None and self.core.languages is None:
             self.core.languages = ["en"]
+
+        # ``val_percent`` is a fraction despite the name. Passing 15 for "15%"
+        # silently produced a 77% validation split rather than 15%, so it is
+        # rejected outright instead of quietly ruining the dataset.
+        val = self.core.val_percent
+        if not 0.0 <= val < 1.0:
+            raise ValueError(
+                f"val_percent must be a fraction in [0, 1), got {val!r}. For a 15% validation split pass 0.15, not 15."
+            )
 
     @classmethod
     def flat(cls, **kwargs) -> "GenerationConfig":
@@ -346,4 +608,8 @@ class GenerationConfig:
                 raise TypeError(f"Unknown configuration option: {key!r}")
             group, field_name = mapping
             grouped[group][field_name] = value
-        return cls(**{g: _GROUP_TYPES[g](**vals) for g, vals in grouped.items() if vals})
+        config = cls(**{g: _GROUP_TYPES[g](**vals) for g, vals in grouped.items() if vals})
+        # Remember what was set explicitly: a pinned page size is a contract the
+        # physical media model has to honour rather than quietly override.
+        config.explicit_options = frozenset(kwargs)
+        return config

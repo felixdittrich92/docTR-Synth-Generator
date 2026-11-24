@@ -91,3 +91,9 @@ def test_generate_image_outline_path(tiny_font_dir, temp_image_dir):
     img = gen.generate_image("Test")
     assert isinstance(img, Image.Image)
     assert img.mode == "RGB"
+
+
+def test_generate_image_accepts_a_font_override(tiny_font_dir, temp_image_dir):
+    gen = _gen(tiny_font_dir, temp_image_dir)
+    font = next(iter(gen.font_selector.font_support_table))
+    assert gen.generate_image("abc", font_path=font) is not None

@@ -7,6 +7,7 @@ import hashlib
 import math
 import multiprocessing as mp
 import random
+import unicodedata
 from dataclasses import dataclass, field
 from queue import Empty
 
@@ -362,7 +363,51 @@ class PageGenerator:
         ss = self.text_renderer.supersample
         baseline = font_size * self._BASELINE
         coverage.info["ink_top"] = baseline + top - bold_width / ss - self.config.recognition.padding
+        band = self._text_band(word, font_path, font_size)
+        if band is not None:
+            coverage.info["band"] = (baseline + band[0], baseline + band[1])
         return coverage
+
+    # Cap-height and descender reference per script: annotators box every word of a
+    # line over the same text band, not over its own ink ('ace' would be x-height only).
+    _BAND_REFERENCE = {
+        "LATIN": "Hg", "CYRILLIC": "\u041d\u0443", "GREEK": "\u0397\u03b3", "ARMENIAN": "\u0531\u0584",
+        "GEORGIAN": "\u10d0\u10e4", "HEBREW": "\u05dc\u05da", "ARABIC": "\u0644\u062c",
+        "CJK": "\u56fd", "HIRAGANA": "\u56fd", "KATAKANA": "\u56fd", "HANGUL": "\ud55c",
+        "DEVANAGARI": "\u0915\u093f\u0915\u0941", "BENGALI": "\u0995\u09bf\u0995\u09c1",
+        "THAI": "\u0e1b\u0e39\u0e48",
+    }  # fmt: skip
+    # Annotators leave a little air above and below the text: real word boxes (FUNSD,
+    # CORD) sit ~5% of the font size outside the cap-to-descender band.
+    _BAND_MARGIN = 0.05
+
+    def _text_band(self, word: str, font_path: str, font_size: int) -> tuple[float, float] | None:
+        """(top, bottom) of the script's text band relative to the baseline, or ``None``.
+
+        ``None`` (scripts without a clear cap line, faces lacking the reference
+        glyphs) keeps the label on the word's ink.
+        """
+        script = "LATIN"
+        for ch in word:
+            if ch.isalpha():
+                script = unicodedata.name(ch, "?").split(" ")[0]
+                break
+        ref = self._BAND_REFERENCE.get(script)
+        if ref is None:
+            return None
+        key = (font_path, font_size, script)
+        cache = self.__dict__.setdefault("_band_cache", {})
+        if key not in cache:
+            band = None
+            if self.font_selector.supports(ref, font_path):
+                try:
+                    _, top, _, bottom = self.text_renderer._get_font(font_path, font_size).getbbox(ref, anchor="ls")
+                    margin = self._BAND_MARGIN * font_size
+                    band = (float(top) - margin, float(bottom) + margin)
+                except Exception:
+                    band = None
+            cache[key] = band
+        return cache[key]
 
     def _emit(self, page, coverage, style, paste_x: float, y: float, polygons: list[Polygon]) -> bool:
         px, py = int(paste_x), int(round(y + coverage.info.get("ink_top", 0)))
@@ -370,11 +415,18 @@ class PageGenerator:
         bbox = coverage.getchannel("A").getbbox()
         if bbox:
             left, top, right, bottom = bbox
+            box_top, box_bottom = py + top, py + bottom
+            band = coverage.info.get("band")
+            if band is not None:
+                # Label the line's text band (cap height to descender), like human
+                # annotations; the ink always stays inside the box.
+                box_top = min(box_top, int(round(y + band[0])))
+                box_bottom = max(box_bottom, int(round(y + band[1])))
             polygons.append([
-                [px + left, py + top],
-                [px + right, py + top],
-                [px + right, py + bottom],
-                [px + left, py + bottom],
+                [px + left, box_top],
+                [px + right, box_top],
+                [px + right, box_bottom],
+                [px + left, box_bottom],
             ])
             # The smallest glyph on the page sets the degradation budget.
             self._min_text_px = min(self._min_text_px, float(bottom - top))
@@ -925,6 +977,7 @@ class PageGenerator:
         rotation = Image.Transpose.ROTATE_90 if mode == "ccw" else Image.Transpose.ROTATE_270
         rotated = coverage.transpose(rotation)
         rotated.info.pop("ink_top", None)  # a rotated word's baseline is a column, not a line
+        rotated.info.pop("band", None)
         return rotated
 
     def _fill_column(
@@ -1542,7 +1595,20 @@ class PageGenerator:
         font_size = max(self._min_font(), min(int(width / 22), cfg.font_size_range[1]))
         y = by0
 
+        separator_char = random.choice("=-*._")
+
         def separator(yy: int) -> int:
+            # Thermal printers print their rules as a row of characters. They look
+            # exactly like text, and real annotations (CORD) leave them unlabelled -
+            # so they are drawn here without a box: the detector must learn that a
+            # row of '=' is a rule, not a word.
+            if random.random() < 0.5:
+                row = self._render_word(separator_char * 60, font_size, 0, "body")
+                if row is not None:
+                    row = row.crop((0, 0, min(row.width, bx1 - bx0), row.height))
+                    style = self._style_at(page, bx0, yy, width, font_size * 2, 0)
+                    page.alpha_composite(recolor_coverage(row, style), (bx0, int(yy + row.info.get("ink_top", 0))))
+                    return yy + int(font_size * 1.2)
             dash, gap = max(3, font_size // 2), max(2, font_size // 3)
             x = bx0
             while x < bx1:

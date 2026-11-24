@@ -1138,3 +1138,53 @@ def test_show_through_is_light_grey_and_unlabelled(tiny_font_dir):
     assert shown.size > 500  # visible
     assert shown.min() > 140  # light grey, never dark like real print
     assert labels == []  # drawn into a scratch layer: nothing reaches the ground truth
+
+
+def test_words_of_a_line_get_one_text_band(tmp_path):
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+    def box(y0, y1):
+        pen = TTGlyphPen(None)
+        pen.moveTo((60, y0))
+        pen.lineTo((60, y1))
+        pen.lineTo((540, y1))
+        pen.lineTo((540, y0))
+        pen.closePath()
+        return pen.glyph()
+
+    # x-height 'a', cap 'H', descender 'g': the band reference glyphs are present.
+    glyphs = {".notdef": box(0, 700), "a": box(0, 500), "H": box(0, 700), "g": box(-200, 500)}
+    glyphs["space"] = TTGlyphPen(None).glyph()
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder(list(glyphs))
+    fb.setupGlyf(glyphs)
+    fb.setupCharacterMap({ord(c): c for c in "aHg"} | {32: "space"})
+    fb.setupHorizontalMetrics(dict.fromkeys(glyphs, (600, 60)))
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "Band", "styleName": "Regular"})
+    fb.setupOS2()
+    fb.setupPost()
+    fb.save(str(tmp_path / "Band.ttf"))
+    cfg = _cfg(
+        str(tmp_path), det_layout="paragraph", det_heading_prob=0.0, det_vertical_prob=0.0, det_max_blocks=1,
+        det_furniture_prob=0.0, det_bleed_through_prob=0.0,
+    )  # fmt: skip
+    cfg.realism.rotation_prob = cfg.realism.perspective_prob = 0.0
+    random.seed(0)
+    pg = PageGenerator(cfg)
+    pg.config.detection.punctuation_prob = 0.0
+    _, polygons = pg.generate_page(["aa", "HH", "gg", "aHg"])
+    first_line = [p for p in polygons if abs(p[0][1] - polygons[0][0][1]) < 3]
+    assert len(first_line) >= 3
+    assert len({p[0][1] for p in first_line}) == 1 and len({p[2][1] for p in first_line}) == 1  # same top, same bottom
+
+
+def test_receipt_separator_rows_are_not_labelled(tiny_font_dir):
+    for seed in range(6):
+        random.seed(seed)
+        np.random.seed(seed)
+        pg = PageGenerator(_cfg(tiny_font_dir, det_layout="receipt"))
+        _, polygons = pg.generate_page(WORDS)
+        widest = max((max(pt[0] for pt in p) - min(pt[0] for pt in p) for p in polygons), default=0)
+        assert widest < 0.9 * pg.config.detection.page_width_range[1]  # no full-width '=====' box

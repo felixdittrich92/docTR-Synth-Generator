@@ -347,6 +347,11 @@ class SyntheticDatasetGenerator:
         task_queue: mp.Queue = mp.Queue(maxsize=self.config.core.queue_maxsize)
         result_queue: mp.Queue = mp.Queue()
 
+        # The clock starts with the workers: queueing the tasks blocks while they
+        # work, so a run small enough to fit the queue would otherwise report a rate
+        # measured over almost no time.
+        start_time = time.time()
+
         # Start worker processes
         workers = []
         for worker_id in range(self.config.core.num_workers):
@@ -364,7 +369,6 @@ class SyntheticDatasetGenerator:
         completed = 0
         successful = 0
         labels = {}
-        start_time = time.time()
 
         while completed < len(tasks):
             try:

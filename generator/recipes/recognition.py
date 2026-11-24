@@ -49,7 +49,7 @@ from pathlib import Path
 
 from ..components.config import GenerationConfig
 from ..components.generator import TextImageGenerator
-from ..components.vocab_coverage import augment_words_for_coverage
+from ..components.vocab_coverage import augment_words_for_coverage, is_large_script_char
 from ..components.vocabs import VOCABS
 from ..dataset_generator import SyntheticDatasetGenerator
 from .corpus import SYNTHETIC_LANGUAGES, THAI_MOJIBAKE, Corpus
@@ -85,6 +85,9 @@ WORDS_PER_LANG = 150_000
 MIN_LEN, MAX_LEN = 1, 24
 MIN_CHAR_COUNT_TRAIN = 1000
 MIN_CHAR_COUNT_VAL = 10
+# CJK ideographs and Hangul syllables: thousands per script, most of them rare in
+# real text. Each still gets this many train labels (val: its own floor, if lower).
+MIN_CHAR_COUNT_LARGE = 50
 JPEG_QUALITY = 92
 
 # Share of the dataset per script family; inside a family weight ~ pool_size ** T
@@ -105,7 +108,7 @@ NUMERIC_RATIO = 0.12  # prices, dates, codes ... (share of all samples)
 # Real crops are full of them - 'of', 'to', 'TO:', 'x', 'No' are ~18% of FUNSD and CORD
 # words - but they are a few hundred of ~150k unique words, so even sampling over the
 # vocabulary would almost never show one.
-SHORT_SHARE = 0.25
+SHORT_SHARE = 0.3
 SHORT_MAX_LEN = 3
 # Short words are taken from the head of the frequency list and drawn Zipf-weighted:
 # the short *tail* of a list is mostly junk ('s01', 'qin'), its head is 'of', 'to', 'a'.
@@ -115,8 +118,18 @@ SHORT_TOP_RANKS = 5000
 MRZ_SHARE = 0.005
 HANDWRITING_SHARE = 0.05
 NATIVE_DIGIT_PROB = 0.4
-UPPER_PROB, TITLE_PROB = 0.08, 0.25
-TITLE_PROB_OVERRIDE = {"de": 0.45, "lb": 0.45}  # nouns are capitalised; the lists are lower-cased
+# Case variants, drawn independently per word and added next to it: forms, receipts and
+# headings are set in capitals far more than running text, so a pool of mostly lower-case
+# corpus words gets ~15% ALL CAPS and ~25% Capitalised words (FUNSD: 28% / 31%, CORD:
+# 30% / 20%; running text has fewer).
+UPPER_PROB, TITLE_PROB = 0.25, 0.42
+TITLE_PROB_OVERRIDE = {"de": 0.7, "lb": 0.7}  # nouns are capitalised; the lists are lower-cased
+SHORT_UPPER_PROB, SHORT_TITLE_PROB = 0.12, 0.25  # 'of', 'и', 'la' are mostly lower-case
+# Punctuation standing alone, as forms and tables have it (':' after a label, '-' for
+# nil, '/' between fields). Glyphs that are ambiguous alone are left out: '|' (l, I, 1),
+# a lone en/em dash (hyphen), '_' and the like (see text._NEVER_ALONE).
+PUNCT_ALONE_SHARE = 0.02
+_PUNCT_ALONE = set(":-/&%#*+=.,;!?•") | set("।。、،؟؛։።")
 PUNCT_PROB = 0.12  # word crops from real pages carry attached punctuation
 # Word-length tokens for scripts written without spaces: what a detector hands the recogniser.
 JOIN_MAX = {"th": 3, "lo": 3, "km": 3, "my": 3, "ja": 3, "zh": 3}
@@ -276,7 +289,8 @@ def prepare(args) -> None:
             words = [w for w in words if selector.renders(w, lang, rng)]
             clean_stats[lang]["broken_cluster"] = before - len(words)
         title_p = TITLE_PROB_OVERRIDE.get(lang, TITLE_PROB)
-        extra = [v for w in words if (v := random_case(w, lang, cs, rng, UPPER_PROB, title_p)) != w]
+        extra = [v for w in words if (v := random_case(w, lang, cs, rng, UPPER_PROB, 0.0)) != w]
+        extra += [v for w in words if (v := random_case(w, lang, cs, rng, 0.0, title_p)) != w]
         words = list(dict.fromkeys(words + extra))
         extra = [v for w in words if rng.random() < PUNCT_PROB and (v := attach_punct(w, lang, cs, rng)) != w]
         words = list(dict.fromkeys(words + extra))
@@ -310,9 +324,9 @@ def prepare(args) -> None:
         out = []
         if ranked:
             weights = [1.0 / (rank + 1) for rank in range(len(ranked))]
-            title_p = TITLE_PROB_OVERRIDE.get(lang, TITLE_PROB)
+            title_p = SHORT_TITLE_PROB * TITLE_PROB_OVERRIDE.get(lang, TITLE_PROB) / TITLE_PROB
             for w in rng.choices(ranked, weights=weights, k=n - n_num):
-                w = random_case(w, lang, cs, rng, UPPER_PROB, title_p)
+                w = random_case(w, lang, cs, rng, SHORT_UPPER_PROB, title_p)
                 out.append(attach_punct(w, lang, cs, rng) if rng.random() < PUNCT_PROB * 2 else w)
         # Quantities, item and page numbers: '1', '12', '3.', '(2)'.
         systems = native_digit_systems(lang, cs)
@@ -332,8 +346,11 @@ def prepare(args) -> None:
         for lang, ws in words_by_lang.items():
             n = q.get(lang, 0)
             n_short = round(n * SHORT_SHARE)
+            alone = sorted(_PUNCT_ALONE & charsets[lang])
+            n_alone = round(n * PUNCT_ALONE_SHARE) if alone else 0
             out += [(lang, t) for t in short_tokens(lang, short_words[split].get(lang, []), n_short)]
-            out += [(lang, w) for w in cycle_sample(ws, n - n_short, rng)]
+            out += [(lang, rng.choice(alone)) for _ in range(n_alone)]
+            out += [(lang, w) for w in cycle_sample(ws, n - n_short - n_alone, rng)]
         num_w = {lang: weights[lang] for lang in words_by_lang}
         for lang, n in quotas(num_w, n_num).items():
             out += [(lang, t) for t in numeric_tokens(lang, n, charsets[lang], rng, NATIVE_DIGIT_PROB)]
@@ -373,7 +390,9 @@ def prepare(args) -> None:
     def complete(pool: list[tuple[str, str]], floor: int, seed: int) -> tuple[list[tuple[str, str]], int]:
         """Top every vocab character up to ``floor`` occurrences, with renderable tokens only."""
         texts = [t for _, t in pool]
-        texts, n_added, _ = augment_words_for_coverage(texts, charset, min_count=floor, seed=seed, accept=accept)
+        texts, n_added, _ = augment_words_for_coverage(
+            texts, charset, min_count=floor, seed=seed, accept=accept, large_min_count=_large_floor(args)
+        )
         pool = pool + [("*", t) for t in texts[len(pool) :]]
         counts = Counter(c for _, t in pool for c in t)
         # Marks the coverage helper cannot synthesise (Latin tone marks) and digits of
@@ -597,6 +616,15 @@ def _coverage(out: Path) -> tuple[str, dict[str, Counter], dict[str, list[str]],
     return vocab, counts, missing, unexpected
 
 
+def _large_floor(args) -> int:
+    return getattr(args, "min_char_count_large", MIN_CHAR_COUNT_LARGE)
+
+
+def _floor_for(char: str, floor: int, large: int) -> int:
+    """The floor a character is held to: CJK ideographs and Hangul have their own."""
+    return min(floor, large) if is_large_script_char(char) else floor
+
+
 def verify(args) -> bool:
     """Every vocab character present in the *rendered* labels of both splits?"""
     out = Path(args.out)
@@ -612,8 +640,9 @@ def verify(args) -> bool:
     if unexpected:
         ok = False
         print(f"\nlabels contain {len(unexpected)} characters NOT in vocab.txt: {''.join(unexpected)}")
+    large = _large_floor(args)
     for split, floor in (("train", args.min_char_count), ("val", args.min_char_count_val)):
-        thin = [(c, counts[split][c]) for c in vocab if 0 < counts[split][c] < floor]
+        thin = [(c, counts[split][c]) for c in vocab if 0 < counts[split][c] < _floor_for(c, floor, large)]
         if thin:
             print(f"\n{split}: {len(thin)} characters below the floor of {floor}: {thin[:20]}")
     if ok:
@@ -645,7 +674,12 @@ def topup(args) -> None:
             floor = args.min_char_count if split == "train" else args.min_char_count_val
             seed_words = [w for w in _dataset_labels(out)[split][:200_000] if set(w) & target]
             words, _, _ = augment_words_for_coverage(
-                seed_words, target, min_count=floor, seed=SEED + 7, accept=lambda t: selector.renders(t, rng=rng)
+                seed_words,
+                target,
+                min_count=floor,
+                seed=SEED + 7,
+                accept=lambda t: selector.renders(t, rng=rng),
+                large_min_count=_large_floor(args),
             )
             words = words[len(seed_words) :]
             words += combining_filler(charset, [c for c in target if unicodedata.combining(c)], rng, floor)
@@ -688,6 +722,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--words-per-lang", type=int, default=WORDS_PER_LANG)
     p.add_argument("--min-char-count", type=int, default=MIN_CHAR_COUNT_TRAIN, help="per-character floor in train")
     p.add_argument("--min-char-count-val", type=int, default=MIN_CHAR_COUNT_VAL, help="per-character floor in val")
+    p.add_argument(
+        "--min-char-count-large",
+        type=int,
+        default=MIN_CHAR_COUNT_LARGE,
+        help="per-character floor for CJK ideographs and Hangul syllables (thousands each; most are rare)",
+    )
     p.add_argument("--extra-chars", default="", help="characters added to the vocab on top of the docTR vocabs")
     p.add_argument("--font-src", default="fonts_v1", help="unzipped fonts_v1 release (downloaded if missing)")
     p.add_argument("--cache", default=".recipe_cache", help="corpora, extra fonts and the font scan")

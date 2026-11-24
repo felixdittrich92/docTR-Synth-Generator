@@ -135,7 +135,8 @@ python -m generator.recipes.detection render  --out multilingual_det
 
 `--languages` takes `european`, `multilingual` (every non-CJK vocab: 96 languages) or `all`, or
 codes such as `de,fr,ru`. `--num-train`, `--num-val` and `--min-char-count` set the size and the
-per-character floor. Recognition: `--handwriting-share` (default `0.05`) writes crops in one of ~40
+per-character floor (`--min-char-count-large`, default `50`, for the thousands of CJK ideographs and Hangul
+syllables). Recognition: `--handwriting-share` (default `0.05`) writes crops in one of ~40
 handwriting faces (Latin, Cyrillic, Greek, Arabic, Hebrew, Thai, Indic, CJK, Korean). Detection:
 `--density` (`mixed` by default: 55% letters, 30% reports, 15% broadsheet-dense pages with up to ~2500
 words), `--negative-share` (default `0.05`, pages without text) and `--input-size` (default `1024`, the

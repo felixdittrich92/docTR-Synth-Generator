@@ -64,12 +64,15 @@ def test_synthesized_tokens_are_single_script():
         assert len(scripts) <= 1, (token, scripts)  # never mix scripts in one token
 
 
-def test_large_scripts_left_to_corpus():
-    # Japanese includes thousands of CJK ideographs - synthesis must not try to
-    # cover them all (that would bloat the dataset); only its small sub-scripts.
+def test_large_scripts_are_covered_without_bloat():
+    # Japanese includes thousands of CJK ideographs: every one must appear, but at
+    # the large-script floor and packed several per token - not thousands of
+    # samples per character.
     target = resolve_target_vocab("ja", None)
-    _, added, _ = augment_words_for_coverage([], target, min_count=3, seed=0)
-    assert added < 2000
+    out, added, _ = augment_words_for_coverage([], target, min_count=3, seed=0)
+    counts = Counter(c for w in out for c in w)
+    assert all(counts[c] >= 3 for c in target if c.isalpha())
+    assert added < len(target) * 1.5
 
 
 def test_combining_marks_always_follow_a_base_letter():
@@ -230,3 +233,32 @@ def test_all_vocabs_synthesis_is_structurally_valid():
                     assert follows_letter, f"dangling virama in {key}: {token!r}"
                 if c in _PREBASE_VOWELS:
                     assert follows_letter, f"orphaned pre-base vowel in {key}: {token!r}"
+
+
+def test_large_scripts_are_covered_to_their_own_floor():
+    # 600 Hangul syllables nobody uses in a word list: each must still show up,
+    # at the large-script floor rather than the full one.
+    syllables = {chr(0xAC00 + i) for i in range(600)}
+    target = syllables | {"a", "b"}
+    out, added, _ = augment_words_for_coverage(["ab"], target, min_count=20, seed=0, large_min_count=3)
+    counts = Counter(c for w in out for c in w)
+    assert all(counts[c] >= 3 for c in syllables)
+    assert all(counts[c] >= 20 for c in "ab")
+    assert added < 600 * 3  # runs of 2-4 syllables, not one token per occurrence
+    assert all(len(w) <= 4 for w in out[1:] if set(w) <= syllables)
+
+
+def test_large_script_runs_fall_back_to_single_characters_when_rejected():
+    ideographs = {chr(0x4E00 + i) for i in range(450)}
+    out, _, _ = augment_words_for_coverage([], ideographs, min_count=2, seed=1, accept=lambda t: len(t) == 1)
+    counts = Counter(c for w in out for c in w)
+    assert all(counts[c] >= 2 for c in ideographs)
+    assert all(len(w) == 1 for w in out)
+
+
+def test_native_number_signs_never_sit_beside_ascii_digits():
+    signs = {"௰", "௱", "፪", "፫", "፲", "୲"}  # Tamil ten/hundred, Ethiopic numerals, Odia fraction
+    out, _, _ = augment_words_for_coverage([], signs, min_count=6, seed=3)
+    counts = Counter(c for w in out for c in w)
+    assert all(counts[c] >= 6 for c in signs)
+    assert not any(ch.isascii() and ch.isdigit() for w in out for ch in w)

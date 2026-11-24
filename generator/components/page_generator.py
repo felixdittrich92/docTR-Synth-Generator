@@ -79,6 +79,7 @@ class PageGenerator:
             config.resources.bg_image_dir,
             cache_size=config.resources.bg_cache_size,
             max_dimension=config.resources.bg_max_dimension,
+            procedural_prob=config.resources.procedural_bg_prob,
         )
         self.final_augs = build_final_augmentations(config)
         # Per-page style context, reset by every ``generate_page`` call.

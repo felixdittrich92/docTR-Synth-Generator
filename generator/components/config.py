@@ -71,6 +71,9 @@ class ResourceConfig:
             filenames/URLs to use instead of the default set.
         bg_cache_size: number of decoded backgrounds kept in memory.
         bg_max_dimension: backgrounds larger than this are downscaled.
+        procedural_bg_prob: share of backgrounds that are generated magazine,
+            brochure and poster designs (colour fields, gradients, sidebars,
+            halftone, geometric artwork) instead of a background image.
         verify_shaping: shape every word with HarfBuzz before using a font and
             reject faces that would draw a tofu box, a dotted circle or an empty
             glyph - the image then always shows exactly its label. Needs the
@@ -89,6 +92,7 @@ class ResourceConfig:
     background_manifest_url: str | None = None
     bg_cache_size: int = 50
     bg_max_dimension: int = 2000
+    procedural_bg_prob: float = 0.3
     verify_shaping: bool = True
 
 

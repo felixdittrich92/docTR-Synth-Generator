@@ -17,7 +17,8 @@ in ~100 languages and 24 scripts.
   crop shows a tofu box, a dotted circle or an empty glyph its label doesn't mention.
 - **Complete vocab coverage** - every character of the docTR vocab you train on appears in train *and* val.
 - **Realistic documents** - paragraphs, newspapers, forms, tables, receipts, ID cards and vertical CJK text
-  on real paper sizes, with photos, stamps, handwriting, barcodes and punch holes; folded or crumpled;
+  on real paper sizes and on generated magazine-style designs, with photos, stamps, handwriting, barcodes
+  and punch holes; folded or crumpled;
   scanned in colour, grayscale or black-and-white, or photographed on tablecloths and tables (bent sheets,
   perspective, uneven light, shadows, colour casts).
 - **Hard negatives** - unlabelled show-through from the back of the sheet, and pages with no text at all
@@ -108,6 +109,7 @@ The options you are most likely to change:
 | `media_dpi_range` | `(150, 300)` | scan resolution of the physical page |
 | `min_local_contrast` | `30.0` | recognition: re-draw a crop until every part of the word is readable |
 | `language_balance` | `"balanced"` | `"balanced"` or `"proportional"` split across languages |
+| `procedural_bg_prob` | `0.3` | share of generated magazine/brochure/poster backgrounds (colour fields, gradients, sidebars, halftone, artwork) |
 | `wordlist_path` / `font_dir` / `bg_image_dir` | `None` | use your own words, fonts or backgrounds instead of the downloads |
 
 All options are documented in [`generator/components/config.py`](generator/components/config.py);

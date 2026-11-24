@@ -21,6 +21,7 @@ from PIL import Image, ImageFilter
 
 from .config import GenerationConfig
 from .legibility import DegradationBudget
+from .textures import surface
 
 __all__ = ["apply_capture", "should_capture"]
 
@@ -56,13 +57,17 @@ def _project(coeffs: np.ndarray, x: float, y: float) -> list[float]:
     return [(a * x + b * y + c) / denom, (d * x + e * y + f) / denom]
 
 
-def _surface_background(size: tuple[int, int]) -> Image.Image:
+def _surface_background(size: tuple[int, int], textured_prob: float = 0.0) -> Image.Image:
     """A generated surface for the sheet to rest on.
 
     Deliberately generated rather than a photo: a desk photo would carry its own
     printed text into the frame as unlabelled false negatives - the same trap
-    ``plain_background_prob`` guards against for page backgrounds.
+    ``plain_background_prob`` guards against for page backgrounds. With
+    ``textured_prob`` it is a procedural tablecloth, wooden table or crumpled
+    paper (see ``textures.py``) - the fine structure detectors mistake for text.
     """
+    if random.random() < textured_prob:
+        return surface(size)
     width, height = size
     tone = random.randint(55, 205)
     arr = np.full((height, width, 3), float(tone), dtype=np.float32)
@@ -224,11 +229,13 @@ def apply_capture(
     page: Image.Image,
     polygons: list[Polygon],
     budget: DegradationBudget | None = None,
+    textured_prob: float | None = None,
 ) -> tuple[Image.Image, list[Polygon]]:
     """Photograph ``page``: warp it onto a surface, light it and shake the camera.
 
     The word polygons are pushed through the same homography, so the labels stay
-    pixel-exact no matter how strong the perspective is.
+    pixel-exact no matter how strong the perspective is. ``textured_prob``
+    overrides :attr:`CaptureConfig.textured_surface_prob` for this shot.
     """
     cfg = config.capture
     if random.random() < cfg.curl_prob:
@@ -275,7 +282,8 @@ def apply_capture(
     )
 
     # 2. Surface, drop shadow, sheet.
-    scene = _surface_background((canvas_w, canvas_h)).convert("RGBA")
+    surface_prob = cfg.textured_surface_prob if textured_prob is None else textured_prob
+    scene = _surface_background((canvas_w, canvas_h), surface_prob).convert("RGBA")
     if random.random() < cfg.shadow_prob:
         offset = int(min(canvas_w, canvas_h) * cfg.shadow_offset_frac * random.uniform(0.5, 1.5))
         blur = max(1.0, min(canvas_w, canvas_h) * cfg.shadow_blur_frac * random.uniform(0.6, 1.6))

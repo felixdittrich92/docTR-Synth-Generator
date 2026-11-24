@@ -306,3 +306,11 @@ def test_page_plan_negatives_do_not_change_text_pages():
     mixed = list(page_plan(50, 3, pools, nums, weights, negative_share=0.3))
     assert [p[:2] for p in plain] == [m[:2] for m in mixed]
     assert not any(p[2] for p in plain) and 5 <= sum(m[2] for m in mixed) <= 25
+
+
+def test_mrz_tokens_follow_the_machine_readable_alphabet():
+    from generator.recipes.recognition import mrz_tokens
+
+    tokens = mrz_tokens(200, random.Random(0))
+    assert all(len(t) == 30 and set(t) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<") for t in tokens)
+    assert any("<<" in t for t in tokens)

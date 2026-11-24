@@ -325,6 +325,9 @@ class DetectionConfig:
         furniture_prob: probability a page carries furniture - header/footer with
             a page number, a stamp, a signature, a redaction bar, a logo.
         punch_hole_prob: chance a text page carries two filing holes in its left margin.
+        picture_prob: chance a paragraph or newspaper page embeds a photo (unlabelled) with a caption.
+        crease_prob: chance the sheet is folded or crumpled; creases shade ink and paper alike
+            (receipts are crumpled more often).
         stamp_prob / redaction_prob / signature_prob / logo_prob: the mix of
             furniture, conditional on ``furniture_prob``.
         edge_truncation_prob: probability a block bleeds past the margin so words
@@ -388,6 +391,8 @@ class DetectionConfig:
     handwriting_prob: float = 0.35
     furniture_prob: float = 0.3
     punch_hole_prob: float = 0.06
+    crease_prob: float = 0.2
+    picture_prob: float = 0.3
     stamp_prob: float = 0.15
     redaction_prob: float = 0.12
     signature_prob: float = 0.2
@@ -419,6 +424,8 @@ class CaptureConfig:
         min_contrast_factor: the least local contrast lighting may leave, as a
             fraction of the original. Falloff and glare each scale contrast, and
             the product is what erases text, so the pair is bounded together.
+        textured_surface_prob: chance the sheet lies on a procedural tablecloth, wooden
+            table or crumpled paper instead of a plain surface.
         curl_prob / curl_strength_range: chance the sheet is bent (sagging, an edge
             lifting, a gentle ripple) and the largest vertical displacement as a
             share of the page height. Text lines then bow, as on any phone photo.
@@ -448,6 +455,7 @@ class CaptureConfig:
     motion_blur_length_range: tuple[int, int] = (3, 9)
     surface_tone_range: tuple[int, int] = (55, 205)
     curl_prob: float = 0.6
+    textured_surface_prob: float = 0.65
     curl_strength_range: tuple[float, float] = (0.004, 0.02)
     partial_shadow_prob: float = 0.25
     colour_cast_prob: float = 0.6

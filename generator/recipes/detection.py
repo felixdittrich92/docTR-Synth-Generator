@@ -90,6 +90,17 @@ PAGE_DENSITY = {
     "medium": ((12.0, 16.0), 0.05, (14, 20), 18, (5, 14), (2, 4)),
     "high": ((8.5, 12.5), 0.22, (9, 15), 48, (6, 22), (3, 6)),  # the generator's own defaults
 }
+# Per-preset limits: (max boxes, delivered long edge, min text px at 1024, max tiny share).
+# Dense pages - a broadsheet carries 2,000+ words - keep their real density: more boxes,
+# a larger delivered image (for training at --input_size 1536/2048) and the fine print
+# real newspapers have.
+DENSITY_LIMITS = {
+    "low": (800, 1600, 5.0, 0.03),
+    "medium": (1500, 1600, 5.0, 0.04),
+    "high": (3000, 2048, 4.0, 0.06),
+}
+# --density mixed (the default) draws the preset per page.
+DENSITY_MIX = {"low": 0.5, "medium": 0.3, "high": 0.2}
 
 WORDS_PER_LANG = 30_000
 CANDIDATES_PER_PAGE = 600  # the page recycles these, so this bounds per-page vocabulary
@@ -116,6 +127,9 @@ LAYOUT_DEFAULT = {"paragraph": 0.34, "newspaper": 0.12, "form": 0.18, "table": 0
 LAYOUT_CJK_VERTICAL = {"paragraph": 0.24, "newspaper": 0.18, "form": 0.12, "table": 0.11,
                        "receipt": 0.06, "id_card": 0.04, "vertical": 0.25}  # fmt: skip
 CJK_VERTICAL = {"ja", "zh"}
+# Dense typesetting belongs to newspapers, long reports and tables - a dense receipt or
+# ID card does not exist.
+LAYOUT_DENSE = {"newspaper": 0.5, "paragraph": 0.3, "table": 0.2}
 
 
 # =============================================================================
@@ -294,22 +308,47 @@ def text_heights_at_input(
     return w[h >= 3 * w]
 
 
-def legible_at_input_size(polygons: np.ndarray, size: tuple[int, int]) -> bool:
-    """Whether no more than ``MAX_TINY_SHARE`` of the words fall below ``MIN_TEXT_PX``."""
+def legible_at_input_size(
+    polygons: np.ndarray, size: tuple[int, int], min_px: float = MIN_TEXT_PX, max_tiny: float = MAX_TINY_SHARE
+) -> bool:
+    """Whether no more than ``max_tiny`` of the words fall below ``min_px`` at docTR's input size."""
     heights = text_heights_at_input(polygons, size)
-    return not len(heights) or float((heights < MIN_TEXT_PX).mean()) <= MAX_TINY_SHARE
+    return not len(heights) or float((heights < min_px).mean()) <= max_tiny
 
 
 class PageWorker(Worker):
     """Renders one page in faces of its language."""
 
-    def __init__(self, cfg: GenerationConfig, font_dir: str, max_long_edge: int, max_boxes: int):
+    def __init__(
+        self,
+        cfg: GenerationConfig,
+        font_dir: str,
+        max_long_edge: int | None = None,
+        max_boxes: int | None = None,
+        density: str = "low",
+    ):
         self.selector = ManifestFontSelector(
             font_dir, handwriting=cfg.resources.auto_download_fonts, cache_dir=cfg.resources.font_cache_dir
         )
         self.gen = PageGenerator(cfg, font_selector=self.selector)
-        self.max_long_edge, self.max_boxes = max_long_edge, max_boxes
+        self.fixed_long_edge, self.fixed_max_boxes = max_long_edge, max_boxes
+        self.density = density
+        self.max_long_edge, self.max_boxes = max_long_edge or MAX_LONG_EDGE, max_boxes or MAX_BOXES_PER_PAGE
+        self.min_px, self.max_tiny = MIN_TEXT_PX, MAX_TINY_SHARE
+        self.dense = False
         self.save = ("JPEG", {"quality": cfg.core.output_jpeg_quality}) if cfg.core.output_jpeg else ("PNG", {})
+
+    def _apply_density(self) -> None:
+        """Pick this page's typography preset (``mixed``: drawn per page) and its limits."""
+        preset = self.density
+        if preset == "mixed":
+            preset = random.choices(list(DENSITY_MIX), weights=list(DENSITY_MIX.values()))[0]
+        apply_density(self.gen.config, preset)
+        self.dense = preset == "high"
+        boxes, long_edge, self.min_px, self.max_tiny = DENSITY_LIMITS[preset]
+        self.max_boxes = self.fixed_max_boxes or boxes
+        self.max_long_edge = self.fixed_long_edge or long_edge
+        self.gen.config.media.delivery_long_edge_range = (DELIVERY_LONG_EDGE[0], float(self.max_long_edge))
 
     def page(self, lang: str, words: list[str], negative: bool = False) -> tuple[Image.Image, np.ndarray] | None:
         """Render a page whose text stays legible at docTR's input size (``None`` if none did).
@@ -317,6 +356,7 @@ class PageWorker(Worker):
         ``negative`` renders a page without any labelled text (see
         :meth:`PageGenerator.generate_page`); ``words`` then only feed its show-through.
         """
+        self._apply_density()
         if negative:
             self.selector.language = lang
             page, _ = self.gen.generate_page(words, negative=True)
@@ -328,14 +368,14 @@ class PageWorker(Worker):
             return page, np.zeros((0, 4, 2))
         for _ in range(PAGE_ATTEMPTS):
             result = self._page_once(lang, words)
-            if result is not None and legible_at_input_size(result[1], result[0].size):
+            if result is not None and legible_at_input_size(result[1], result[0].size, self.min_px, self.max_tiny):
                 return result
         return None
 
     def _page_once(self, lang: str, words: list[str]) -> tuple[Image.Image, np.ndarray] | None:
         det = self.gen.config.detection
         cjk = lang in CJK_VERTICAL
-        det.layout_weights = LAYOUT_CJK_VERTICAL if cjk else LAYOUT_DEFAULT
+        det.layout_weights = LAYOUT_CJK_VERTICAL if cjk else LAYOUT_DENSE if self.dense else LAYOUT_DEFAULT
         # Stacked vertical text emits one box per character: fine for CJK, a box
         # explosion anywhere else.
         det.vertical_stacked_prob = 0.7 if cjk else 0.05
@@ -403,8 +443,18 @@ def page_plan(n: int, seed: int, pools, nums, weights, negative_share: float = 0
         yield lang, words, neg_rng.random() < negative_share
 
 
+def apply_density(cfg: GenerationConfig, preset: str) -> None:
+    """Set the typography of one ``PAGE_DENSITY`` preset on ``cfg``."""
+    body, fine_prob, news_px, max_blocks, table_rows, news_cols = PAGE_DENSITY[preset]
+    cfg.detection.body_point_range = body
+    cfg.detection.fine_print_prob = fine_prob
+    cfg.detection.newspaper_font_size_range = news_px
+    cfg.detection.max_blocks = max_blocks
+    cfg.detection.table_rows_range = table_rows
+    cfg.detection.newspaper_columns_range = news_cols
+
+
 def _config(args) -> GenerationConfig:
-    body, fine_prob, news_px, max_blocks, table_rows, news_cols = PAGE_DENSITY[args.density]
     cfg = GenerationConfig.flat(
         task="detection",
         output_dir=str(args.out),
@@ -418,12 +468,7 @@ def _config(args) -> GenerationConfig:
         media_delivery_long_edge_range=DELIVERY_LONG_EDGE,
         media_resample_prob=1.0,
     )
-    cfg.detection.body_point_range = body
-    cfg.detection.fine_print_prob = fine_prob
-    cfg.detection.newspaper_font_size_range = news_px
-    cfg.detection.max_blocks = max_blocks
-    cfg.detection.table_rows_range = table_rows
-    cfg.detection.newspaper_columns_range = news_cols
+    apply_density(cfg, "low" if args.density == "mixed" else args.density)
     return cfg
 
 
@@ -484,7 +529,7 @@ def render(args) -> None:
     progress = Progress(sum(j[1] for j in jobs), unit="pages")
     if jobs:
         print(f"Rendering {progress.total:,} pages in {len(jobs)} part(s) with {args.workers} workers ...")
-        factory_args = (cfg, str(meta / "fonts"), MAX_LONG_EDGE, MAX_BOXES_PER_PAGE)
+        factory_args = (cfg, str(meta / "fonts"), None, None, args.density)
         with make_pool(args.workers, PageWorker, factory_args) as pool:
             for split, n, start, seed, part in jobs:
                 items = [
@@ -516,7 +561,7 @@ def preview(args) -> Path:
     SyntheticDatasetGenerator(cfg).resolve_backgrounds()
     random.seed(args.seed)
     np.random.seed(args.seed)
-    worker = PageWorker(cfg, str(meta / "fonts"), MAX_LONG_EDGE, MAX_BOXES_PER_PAGE)
+    worker = PageWorker(cfg, str(meta / "fonts"), None, None, args.density)
     wanted = args.preview_languages.split(",") if args.preview_languages else None
     pages = []
     for lang, words, _ in page_plan(args.samples * 8, args.seed, pools, nums, weights):
@@ -540,12 +585,18 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--num-val", type=int, default=NUM_VAL)
     p.add_argument("--part-size", type=int, default=PART_SIZE)
     p.add_argument("--workers", type=int, default=os.cpu_count() or 4)
-    p.add_argument("--density", choices=sorted(PAGE_DENSITY), default="low", help="typography preset (words per page)")
+    p.add_argument(
+        "--density",
+        choices=[*sorted(PAGE_DENSITY), "mixed"],
+        default="mixed",
+        help="typography preset; 'mixed' draws low/medium/high per page (50/30/20%%) - high is broadsheet-dense",
+    )
     p.add_argument(
         "--negative-share",
         type=float,
         default=NEGATIVE_SHARE,
-        help="share of pages without any text (blank, empty forms, graphics, photos, show-through only)",
+        help="share of pages without any text (blank, empty forms, graphics, photos, show-through only, "
+        "creased sheets photographed on cloth or wood, fabric close-ups)",
     )
     p.add_argument("--font-src", default="fonts_v1", help="unzipped fonts_v1 release (downloaded if missing)")
     p.add_argument("--cache", default=".recipe_cache", help="corpora, extra fonts and the font scan")

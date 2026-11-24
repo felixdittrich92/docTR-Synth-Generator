@@ -100,17 +100,19 @@ class TextImageGenerator:
         budget = DegradationBudget.for_text_height(text_height) if text_height else None
         return apply_final_degradations(self.config, image, self.final_augs, budget)
 
-    def generate_image(self, text: str) -> Image.Image | None:
+    def generate_image(self, text: str, font_path: str | None = None) -> Image.Image | None:
         """Generate a single text overlay image.
 
         Args:
             text (str): Text to render
+            font_path (str | None): use this face (e.g. a handwriting face) instead of
+                resolving one through the font selector.
 
         Returns:
             Image.Image | None: RGB image with realistic text overlay, or None if
             no suitable font/background was found.
         """
-        font_path = self.font_selector.get_font_for_text(text)
+        font_path = font_path or self.font_selector.get_font_for_text(text)
         if not font_path:
             return None
 

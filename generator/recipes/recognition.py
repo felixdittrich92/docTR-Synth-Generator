@@ -110,6 +110,10 @@ SHORT_MAX_LEN = 3
 # Short words are taken from the head of the frequency list and drawn Zipf-weighted:
 # the short *tail* of a list is mostly junk ('s01', 'qin'), its head is 'of', 'to', 'a'.
 SHORT_TOP_RANKS = 5000
+# Machine-readable zones (passports, ID cards): 30 characters of A-Z, 0-9 and '<',
+# read verbatim. Real word lists contain none of them.
+MRZ_SHARE = 0.005
+HANDWRITING_SHARE = 0.05
 NATIVE_DIGIT_PROB = 0.4
 UPPER_PROB, TITLE_PROB = 0.08, 0.25
 TITLE_PROB_OVERRIDE = {"de": 0.45, "lb": 0.45}  # nouns are capitalised; the lists are lower-cased
@@ -323,6 +327,8 @@ def prepare(args) -> None:
         words_by_lang: dict[str, list[str]], q: dict[str, int], n_num: int, floor: int, split: str
     ) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
+        n_total = sum(q.values()) + n_num
+        out += [("*", t) for t in mrz_tokens(round(n_total * MRZ_SHARE), rng) if set(t) <= charset]
         for lang, ws in words_by_lang.items():
             n = q.get(lang, 0)
             n_short = round(n * SHORT_SHARE)
@@ -438,6 +444,28 @@ def prepare(args) -> None:
     )
 
 
+def mrz_tokens(n: int, rng: random.Random) -> list[str]:
+    """Lines of machine-readable zones (ICAO 9303 TD1 / TD3 style), at most 30 characters."""
+    up = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    digits = "0123456789"
+    out = []
+    for _ in range(n):
+        kind = rng.random()
+        if kind < 0.35:  # document line: type, issuing state, number, check digit, filler
+            line = rng.choice(["ID", "IP", "AC", "P<", "I<"]) + "".join(rng.choice(up) for _ in range(3))
+            line += "".join(rng.choice(up + digits) for _ in range(9)) + rng.choice(digits)
+        elif kind < 0.7:  # dates, sex, expiry, nationality
+            line = "".join(rng.choice(digits) for _ in range(7)) + rng.choice("MF<")
+            line += "".join(rng.choice(digits) for _ in range(7)) + "".join(rng.choice(up) for _ in range(3))
+        else:  # names
+            line = "".join(rng.choice(up) for _ in range(rng.randint(4, 10))) + "<<"
+            line += "<".join(
+                "".join(rng.choice(up) for _ in range(rng.randint(3, 8))) for _ in range(rng.randint(1, 2))
+            )
+        out.append((line + "<" * 30)[:30])
+    return out
+
+
 def _write_tsv(path: Path, rows: list[tuple[str, str]]) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         for lang, text in rows:
@@ -461,22 +489,36 @@ def _read_tsv(path: Path) -> list[tuple[str, str]]:
 
 
 class CropWorker(Worker):
-    """Renders one recognition crop with a face of the sample's language."""
+    """Renders one recognition crop with a face of the sample's language.
 
-    def __init__(self, cfg: GenerationConfig, font_dir: str):
-        self.selector = ManifestFontSelector(font_dir, handwriting=False)
+    ``handwriting_share`` of the crops are written in a handwriting face (filled-in
+    forms, passports, notes on a waybill) when one covers and cleanly shapes the
+    text; otherwise they stay printed.
+    """
+
+    def __init__(self, cfg: GenerationConfig, font_dir: str, handwriting_share: float = 0.0):
+        self.selector = ManifestFontSelector(
+            font_dir, handwriting=handwriting_share > 0, cache_dir=cfg.resources.font_cache_dir
+        )
         self.gen = TextImageGenerator(cfg, font_selector=self.selector)
+        self.handwriting_share = handwriting_share
         self.save = ("JPEG", {"quality": cfg.core.output_jpeg_quality}) if cfg.core.output_jpeg else ("PNG", {})
 
     def render(self, payload, path):
         """Render ``(lang, text)``; the label record is the text itself."""
         lang, text = payload
         self.selector.language = None if lang == "*" else lang
-        img = self.gen.generate_image(text)
+        hand = self.selector.get_handwriting_font(text) if random.random() < self.handwriting_share else None
+        img = self.gen.generate_image(text, font_path=hand)
         if img is None:
             return None
         img.save(path, self.save[0], **self.save[1])
         return text
+
+
+def _handwriting_share(args) -> float:
+    """Handwriting faces are downloaded on first use, so ``--offline`` turns them off."""
+    return 0.0 if getattr(args, "offline", False) else getattr(args, "handwriting_share", HANDWRITING_SHARE)
 
 
 def _config(args) -> GenerationConfig:
@@ -520,7 +562,7 @@ def render(args) -> None:
         return
     progress = Progress(sum(len(j[0]) for j in jobs))
     print(f"Rendering {progress.total:,} crops in {len(jobs)} part(s) with {args.workers} workers ...")
-    with make_pool(args.workers, CropWorker, (cfg, str(meta / "fonts"))) as pool:
+    with make_pool(args.workers, CropWorker, (cfg, str(meta / "fonts"), _handwriting_share(args))) as pool:
         for rows, final, part in jobs:
             width = max(6, len(str(len(rows))))
             items = [(f"{i:0{width}d}.{ext}", row) for i, row in enumerate(rows)]
@@ -595,7 +637,7 @@ def topup(args) -> None:
     cfg = _config(args)
     SyntheticDatasetGenerator(cfg).resolve_backgrounds()
     ext = "png" if args.png else "jpg"
-    with make_pool(args.workers, CropWorker, (cfg, str(meta / "fonts"))) as pool:
+    with make_pool(args.workers, CropWorker, (cfg, str(meta / "fonts"), _handwriting_share(args))) as pool:
         for split in ("train", "val"):
             if not missing[split]:
                 continue
@@ -654,6 +696,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--no-full-lists", dest="full_lists", action="store_false", help="use the 50k word lists")
     p.add_argument("--offline", action="store_true", help="never download; use cached corpora and fonts only")
     p.add_argument("--png", action="store_true", help="PNG instead of JPEG")
+    p.add_argument(
+        "--handwriting-share",
+        type=float,
+        default=HANDWRITING_SHARE,
+        help="share of crops written in a handwriting face (downloaded once and cached; printed if none fits; "
+        "off with --offline)",
+    )
     p.add_argument("--samples", type=int, default=6, help="preview: crops per script")
     args = p.parse_args(argv)
 

@@ -17,8 +17,11 @@ in ~100 languages and 24 scripts.
   crop shows a tofu box, a dotted circle or an empty glyph its label doesn't mention.
 - **Complete vocab coverage** - every character of the docTR vocab you train on appears in train *and* val.
 - **Realistic documents** - paragraphs, newspapers, forms, tables, receipts, ID cards and vertical CJK text
-  on real paper sizes, with stamps, handwriting, barcodes and punch holes; scanned in colour, grayscale or
-  black-and-white, or photographed (bent sheets, perspective, uneven light, shadows, colour casts).
+  on real paper sizes, with photos, stamps, handwriting, barcodes and punch holes; folded or crumpled;
+  scanned in colour, grayscale or black-and-white, or photographed on tablecloths and tables (bent sheets,
+  perspective, uneven light, shadows, colour casts).
+- **Hard negatives** - unlabelled show-through from the back of the sheet, and pages with no text at all
+  (creased blank paper, fabric, wood, empty forms, graphics), so a detector learns what is *not* text.
 - **Crops like a detector cuts them** - recognition crops carry real margins and the cut-off edges of
   neighbouring lines and table rules, as crops from real pages do.
 - **docTR-ready** - writes the folder layout docTR's training scripts read, or plugs into them on the fly.
@@ -94,9 +97,13 @@ The options you are most likely to change:
 | `det_partial_page_prob` | `0.25` | chance a page ends part-way down, like the last page of a letter |
 | `det_furniture_prob` | `0.3` | headers, page numbers, stamps, logos, barcodes, signatures |
 | `det_handwriting_prob` | `0.35` | chance a form or receipt value is hand-written |
+| `det_picture_prob` | `0.3` | chance a paragraph or newspaper page carries a photo with a caption |
+| `det_crease_prob` | `0.2` | chance a sheet is folded or crumpled (receipts more often) |
+| `det_bleed_through_prob` | `0.25` | chance the back side shows through as light, unlabelled text |
 | `capture_prob` | `0.35` | chance a page is photographed (perspective, shadow, lighting) rather than scanned |
 | `capture_curl_prob` | `0.6` | chance a photographed sheet is bent, so its text lines bow |
-| `grayscale_prob` / `bitonal_prob` | `0.2` / `0.06` | crops and pages delivered in grayscale or black-and-white (fax, copier, scanner apps) |
+| `capture_textured_surface_prob` | `0.65` | chance a photographed sheet lies on fabric, wood or crumpled paper |
+| `grayscale_prob` / `bitonal_prob` | `0.3` / `0.08` | crops and pages delivered in grayscale or black-and-white (fax, copier, scanner apps) |
 | `context_prob` | `0.35` | recognition: crop margins show cut-off neighbouring lines or table rules |
 | `media_dpi_range` | `(150, 300)` | scan resolution of the physical page |
 | `min_local_contrast` | `30.0` | recognition: re-draw a crop until every part of the word is readable |
@@ -126,12 +133,19 @@ python -m generator.recipes.detection render  --out multilingual_det
 
 `--languages` takes `european`, `multilingual` (every non-CJK vocab: 96 languages) or `all`, or
 codes such as `de,fr,ru`. `--num-train`, `--num-val` and `--min-char-count` set the size and the
-per-character floor. Train with docTR as usual:
+per-character floor. Recognition: `--handwriting-share` (default `0.05`) writes crops in one of ~40
+handwriting faces (Latin, Cyrillic, Greek, Arabic, Hebrew, Thai, Indic, CJK, Korean). Detection:
+`--density` (`mixed` by default: 50% letters, 30% reports, 20% broadsheet-dense pages with up to ~3000
+words) and `--negative-share` (default `0.05`, pages without text). Train with docTR as usual:
 
 ```bash
 python references/recognition/train.py crnn_vgg16_bn --train_path european_rec/train --val_path european_rec/val ...
-python references/detection/train.py db_resnet50 --train_path multilingual_det/train --val_path multilingual_det/val ...
+python references/detection/train.py db_resnet50 --train_path multilingual_det/train --val_path multilingual_det/val --rotation ...
 ```
+
+Pass `--rotation` for detection: photographed and skewed pages carry rotated polygons, and without it
+docTR turns them into loose straight boxes. For dense pages a larger `--input_size` (e.g. `1536`)
+keeps small newspaper text above a few pixels.
 
 Each `shard_XXXX/` folder under `train/` is picked up by docTR's recognition script. The model vocab
 is written to `meta/vocab.txt`: add it to docTR's `VOCABS` under a name and pass that name as `--vocab`.
@@ -159,8 +173,12 @@ cfg = GenerationConfig.flat(task="recognition", num_images=100_000, val_percent=
 train_set, val_set = build_recognition_datasets(cfg, vocab="french", img_transforms=img_transforms)
 
 train_loader = DataLoader(
-    train_set, batch_size=64, shuffle=True, num_workers=8,
-    collate_fn=train_set.collate_fn, worker_init_fn=synth_worker_init_fn,
+    train_set,
+    batch_size=64,
+    shuffle=True,
+    num_workers=8,
+    collate_fn=train_set.collate_fn,
+    worker_init_fn=synth_worker_init_fn,
 )
 ```
 

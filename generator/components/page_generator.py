@@ -30,6 +30,7 @@ from .text_styling import (
     recolor_coverage,
     sample_page_palette,
 )
+from .textures import apply_creases, fabric, surface, wood
 from .token_sampler import TokenSampler
 
 __all__ = ["PageGenerator", "DetectionTask"]
@@ -130,8 +131,8 @@ class PageGenerator:
         polygons: list[Polygon] = []
 
         if negative:
-            page = self._draw_negative(page, area, take_word if words else None, rtl)
-            return self._finish_page(page, [], width, height, negative=True)
+            page, photographed = self._draw_negative(page, area, take_word if words else None, rtl)
+            return self._finish_page(page, [], width, height, negative=True, photographed=photographed)
 
         if random.random() < cfg.detection.bleed_through_prob:
             self._add_bleed_through(page, area, take_word, rtl)
@@ -140,6 +141,8 @@ class PageGenerator:
         # out, so vertical and horizontal text can never overlap.
         area, vertical_regions = self._plan_vertical_regions(area, layout)
         self._has_vertical_regions = bool(vertical_regions)
+        if layout in ("paragraph", "newspaper") and random.random() < cfg.detection.picture_prob:
+            area = self._place_picture(page, area, take_word, rtl, polygons, grayscale=layout == "newspaper")
         if layout in ("paragraph", "newspaper", "table") and random.random() < cfg.detection.partial_page_prob:
             # The last page of a letter or report: the body stops part-way down.
             lo, hi = cfg.detection.partial_page_fill_range
@@ -169,10 +172,29 @@ class PageGenerator:
         if layout not in ("id_card", "receipt") and random.random() < cfg.detection.furniture_prob:
             self._add_furniture(page, (margin, margin, width - margin, height - margin), take_word, rtl, polygons)
 
+        crease = cfg.detection.crease_prob * (1.75 if layout == "receipt" else 1.0)
+        if random.random() < crease:
+            page = apply_creases(
+                page,
+                crumple=random.uniform(0.3, 1.2) if random.random() < 0.4 else 0.0,
+                strength=random.uniform(1.0, 2.2) if layout == "receipt" else random.uniform(0.7, 1.5),
+            )
         return self._finish_page(page, polygons, width, height)
 
-    def _finish_page(self, page, polygons: list[Polygon], width: int, height: int, negative: bool = False):
-        """Scan or photograph the finished sheet and deliver it (shared by text and negative pages)."""
+    def _finish_page(
+        self,
+        page,
+        polygons: list[Polygon],
+        width: int,
+        height: int,
+        negative: bool = False,
+        photographed: bool = False,
+    ):
+        """Scan or photograph the finished sheet and deliver it (shared by text and negative pages).
+
+        ``photographed`` forces a camera capture on a textured surface - a crumpled
+        blank sheet on a tablecloth is the negative it exists for.
+        """
         cfg = self.config
         page = page.convert("RGB")
         # A word running off the edge is legitimate, but its *box* must stop at
@@ -186,10 +208,12 @@ class PageGenerator:
         # sheet into a larger frame and the delivery resample resizes it, so
         # both are skipped rather than silently returning other dimensions.
         fixed_size = cfg.pins_page_size()
-        if content and not fixed_size and should_capture(cfg):
+        if content and not fixed_size and (photographed or should_capture(cfg)):
             # A photographed capture already carries rotation in its homography,
             # so the flat page rotation is skipped rather than applied twice.
-            page, polygons = apply_capture(cfg, page, polygons, DegradationBudget.for_text_height(self._min_text_px))
+            budget = DegradationBudget.for_text_height(self._min_text_px)
+            surface_prob = 0.85 if photographed else None
+            page, polygons = apply_capture(cfg, page, polygons, budget, textured_prob=surface_prob)
         elif content and not fixed_size and random.random() < cfg.detection.rotation_prob:
             # ``expand=True`` grows the canvas, so this is skipped too when the
             # caller pinned the output size.
@@ -531,13 +555,144 @@ class PageGenerator:
         layer.putalpha(Image.fromarray(alpha.astype(np.uint8), mode="L"))
         page.alpha_composite(layer)
 
+    # -- pictures -----------------------------------------------------------
+
+    def _picture(self, size: tuple[int, int]) -> Image.Image:
+        """A text-free image for a page: a photo/texture crop, cloth, wood or a soft abstract."""
+        kind = random.random()
+        if kind < 0.45 and self.background_manager.bg_images:  # without images this would be blank
+            return self.background_manager.get_background_crop(size).convert("RGB")
+        if kind < 0.65:
+            return fabric(size)
+        if kind < 0.8:
+            return wood(size)
+        w, h = size  # soft colour fields with a horizon and blurred blobs - a stand-in photograph
+        top, bottom = np.random.randint(40, 230, 3), np.random.randint(20, 200, 3)
+        t = np.linspace(0, 1, h)[:, None, None]
+        arr = top[None, None, :] * (1 - t) + bottom[None, None, :] * t + np.zeros((h, w, 3))
+        img = Image.fromarray(arr.astype(np.uint8))
+        draw = ImageDraw.Draw(img)
+        for _ in range(random.randint(3, 12)):
+            r = random.randint(max(3, w // 30), max(4, w // 5))
+            cx, cy = random.randint(0, w), random.randint(int(h * 0.3), h)
+            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=tuple(int(c) for c in np.random.randint(10, 240, 3)))
+        return img.filter(ImageFilter.GaussianBlur(random.uniform(1.5, 6)))
+
+    def _place_picture(self, page, area, take_word, rtl, polygons, grayscale=False):
+        """A picture with an optional caption at the top of the text area; returns the area below.
+
+        Newspapers and brochures embed photos in the text. The picture is not text
+        and carries no label; the caption under it is text and does.
+        """
+        x0, y0, x1, y1 = area
+        ph = int((y1 - y0) * random.uniform(0.16, 0.38))
+        pw = (x1 - x0) if random.random() < 0.5 else int((x1 - x0) * random.uniform(0.45, 0.7))
+        if ph < 40 or pw < 60:
+            return area
+        px = x0 if not rtl else x1 - pw
+        picture = self._picture((pw, ph))
+        if grayscale and random.random() < 0.6:
+            picture = picture.convert("L").convert("RGB")
+        page.alpha_composite(picture.convert("RGBA"), (px, y0))
+        if random.random() < 0.4:
+            ImageDraw.Draw(page).rectangle((px, y0, px + pw - 1, y0 + ph - 1), outline=(40, 40, 45, 255), width=1)
+        y = y0 + ph + max(4, int(self._body_font() * 0.4))
+        if random.random() < 0.7:  # caption
+            fs = max(self._min_font(), int(self._body_font() * 0.85))
+            style = self._style_at(page, px, y, pw, fs * 2, 0)
+            y = self._fill_box(
+                page, (px, y, px + pw, y1), take_word, polygons, fs, style, 0, rtl, max_lines=random.randint(1, 2)
+            )
+        return (x0, y + max(6, int(self._body_font() * 0.8)), x1, y1)
+
+    # -- security printing -------------------------------------------------
+
+    @staticmethod
+    def _guilloche(page, box, radius: int) -> None:
+        """Fine wave/rosette line patterns printed under the fields of ID documents.
+
+        High-frequency, high-contrast structure that is not text - drawn light, so
+        printed fields over it stay legible.
+        """
+        x0, y0, x1, y1 = box
+        w, h = x1 - x0, y1 - y0
+        layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        colour = random.choice([(120, 160, 210), (200, 120, 150), (120, 180, 140), (190, 170, 110), (160, 140, 200)])
+        alpha = random.randint(70, 130)
+        if random.random() < 0.5:  # interleaved sine bands
+            period = random.uniform(0.15, 0.4) * w
+            amp = random.uniform(0.03, 0.12) * h
+            for k in range(random.randint(14, 30)):
+                base = h * k / 20.0
+                phase = random.uniform(0, 2 * math.pi)
+                pts = [(x, base + amp * math.sin(2 * math.pi * x / period + phase + k * 0.35)) for x in range(0, w, 3)]
+                d.line(pts, fill=(*colour, alpha), width=1)
+        else:  # rosette
+            cx, cy = random.uniform(0.3, 0.7) * w, random.uniform(0.3, 0.7) * h
+            r0, lobes = random.uniform(0.15, 0.35) * min(w, h), random.randint(6, 18)
+            for k in range(random.randint(10, 24)):
+                amp = r0 * random.uniform(0.15, 0.45)
+                phase = k * 2 * math.pi / 24
+                pts = []
+                for t in np.linspace(0, 2 * math.pi, 360):
+                    r = r0 + k * 2.5 + amp * math.sin(lobes * t + phase)
+                    pts.append((cx + r * math.cos(t), cy + r * math.sin(t)))
+                d.line(pts, fill=(*colour, alpha), width=1)
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
+        layer.putalpha(Image.fromarray(np.minimum(np.asarray(layer.getchannel("A")), np.asarray(mask))))
+        page.alpha_composite(layer, (x0, y0))
+
+    @staticmethod
+    def _chip(draw, box) -> None:
+        """A gold contact chip with its contact pads."""
+        x0, y0, x1, y1 = box
+        gold = random.choice([(212, 175, 95), (200, 165, 80), (190, 190, 195)])
+        draw.rounded_rectangle(box, radius=max(2, (x1 - x0) // 8), fill=gold, outline=(120, 95, 40), width=1)
+        mx, my = (x0 + x1) // 2, (y0 + y1) // 2
+        for xx in (x0 + (x1 - x0) // 3, mx, x0 + 2 * (x1 - x0) // 3):
+            draw.line((xx, y0 + 2, xx, y1 - 2), fill=(130, 100, 45), width=1)
+        draw.line((x0 + 2, my, x1 - 2, my), fill=(130, 100, 45), width=1)
+
+    @staticmethod
+    def _portrait(page, box) -> None:
+        """A stand-in ID photo: plain backdrop, head and shoulders, softly lit."""
+        x0, y0, x1, y1 = box
+        w, h = max(1, x1 - x0), max(1, y1 - y0)
+        bg = random.choice([(205, 212, 222), (230, 230, 230), (190, 205, 225), (225, 220, 205)])
+        img = Image.new("RGB", (w, h), bg)
+        d = ImageDraw.Draw(img)
+        skin = random.choice([(232, 200, 175), (198, 150, 115), (150, 105, 75), (95, 65, 45)])
+        cloth = random.choice([(40, 45, 60), (90, 90, 100), (150, 60, 60), (230, 230, 235)])
+        d.ellipse((int(w * 0.05), int(h * 0.68), int(w * 0.95), int(h * 1.3)), fill=cloth)  # shoulders
+        d.ellipse((int(w * 0.3), int(h * 0.18), int(w * 0.7), int(h * 0.7)), fill=skin)  # head
+        hair = random.choice([(30, 25, 20), (90, 60, 35), (160, 120, 70), (200, 200, 200)])
+        d.chord((int(w * 0.28), int(h * 0.12), int(w * 0.72), int(h * 0.55)), 180, 360, fill=hair)
+        img = img.filter(ImageFilter.GaussianBlur(max(0.6, w / 120)))
+        if random.random() < 0.5:
+            img = img.convert("L").convert("RGB")
+        page.alpha_composite(img.convert("RGBA"), (x0, y0))
+        ImageDraw.Draw(page).rectangle((x0, y0, x0 + w - 1, y0 + h - 1), outline=(150, 150, 162, 255))
+
     # -- negative pages ---------------------------------------------------
 
     def _draw_negative(self, page, area, take_word, rtl):
-        """Content of a page with no labelled text; returns the (possibly replaced) page."""
+        """Content of a page with no labelled text.
+
+        Returns the (possibly replaced) page and whether it must be photographed:
+        a creased blank sheet is a camera shot of paper lying on cloth or wood.
+        """
         kind = random.choices(
-            ["blank", "empty_form", "graphics", "photo", "backside"], weights=[0.15, 0.3, 0.2, 0.15, 0.2]
+            ["blank", "empty_form", "graphics", "photo", "backside", "texture", "creased_sheet"],
+            weights=[0.06, 0.15, 0.12, 0.08, 0.15, 0.2, 0.24],
         )[0]
+        if kind == "photo" and not self.background_manager.bg_images:
+            kind = "texture"  # without background images a "photo" would be a blank frame
+        if kind == "texture":
+            # The frame is all tablecloth, crumpled paper or table top.
+            page = surface(page.size, weights=(0.55, 0.15, 0.3)).convert("RGBA")
+            return page, False
         if kind == "photo":
             # A photograph or texture as the whole frame - and no text in it.
             page = self.background_manager.get_page_background(page.size).convert("RGBA")
@@ -545,9 +700,36 @@ class PageGenerator:
             self._draw_empty_form(page, area)
         elif kind == "graphics":
             self._draw_graphics(page, area)
+        elif kind == "creased_sheet":
+            page = self._paper_background(page.size).convert("RGBA")  # paper, not a photo
+            if random.random() < 0.4:
+                page = self._tinted(page)  # a coloured flyer, kraft paper or receipt roll
         if take_word is not None and (kind == "backside" or random.random() < 0.3):
             self._add_bleed_through(page, area, take_word, rtl)
-        return page
+        if kind == "creased_sheet":
+            # Folded in quarters, then crumpled in a pocket: hard ridges and facets.
+            page = apply_creases(
+                page, crumple=random.uniform(0.4, 1.6), folds=random.randint(1, 5), strength=random.uniform(1.5, 3.0)
+            )
+            return page, True
+        if random.random() < 0.35:
+            page = apply_creases(page, crumple=random.uniform(0.3, 1.5) if random.random() < 0.5 else 0.0)
+        return page, False
+
+    @staticmethod
+    def _tinted(page):
+        """``page`` multiplied by a paper colour (keeps the paper's own texture)."""
+        # yellow, green, blue, pink, kraft
+        tint = random.choice([
+            (1.0, 0.96, 0.7),
+            (0.86, 0.94, 0.86),
+            (0.88, 0.93, 1.0),
+            (1.0, 0.88, 0.9),
+            (0.85, 0.72, 0.52),
+        ])
+        arr = np.asarray(page).astype(np.float32)
+        arr[..., :3] *= np.array(tint, np.float32)
+        return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), page.mode)
 
     def _line_ink(self) -> tuple[int, int, int, int]:
         tone = random.randint(20, 110)
@@ -1776,6 +1958,8 @@ class PageGenerator:
         draw.rounded_rectangle(
             (cx0, cy0, cx1, cy1), radius=radius, fill=(tone, tone, max(0, tone - 6)), outline=(140, 145, 160), width=2
         )
+        if random.random() < 0.7:
+            self._guilloche(page, (cx0, cy0, cx1, cy1), radius)
         pad = int(card_h * 0.07)
 
         # Optional vertical side band, as printed on many residence permits and
@@ -1819,9 +2003,10 @@ class PageGenerator:
         photo_w = int(card_w * 0.24)
         photo_h = int((cy1 - body_top) * 0.6)
         px0 = (cx1 - pad - photo_w) if rtl else (cx0 + pad)
-        draw.rectangle(
-            (px0, body_top, px0 + photo_w, body_top + photo_h), fill=(200, 202, 210), outline=(150, 150, 162)
-        )
+        if random.random() < 0.3:  # contact chip instead of the portrait (the back of an eID)
+            self._chip(draw, (px0, body_top, px0 + int(photo_w * 0.8), body_top + int(photo_w * 0.65)))
+        else:
+            self._portrait(page, (px0, body_top, px0 + photo_w, body_top + photo_h))
 
         # Field rows beside the photo, reserving space for a signature + MRZ.
         if rtl:

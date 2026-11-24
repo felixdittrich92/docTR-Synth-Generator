@@ -38,6 +38,8 @@ def _cfg(tiny_font_dir, **kw):
         capture_prob=0.0,
         det_bleed_through_prob=0.0,
         det_partial_page_prob=0.0,
+        det_picture_prob=0.0,
+        det_crease_prob=0.0,
         # Pixel mode: these tests assert exact page sizes. Media mode is
         # exercised separately below.
         media_enabled=False,
@@ -149,7 +151,12 @@ def test_rtl_layout_places_words_from_the_right(tiny_font_dir, monkeypatch):
 
 def test_partial_page_stops_part_way_down(tiny_font_dir):
     words = [f"w{i}" for i in range(400)]
-    cfg = dict(det_layout="paragraph", det_partial_page_prob=1.0, det_partial_page_fill_range=(0.4, 0.4))
+    cfg = dict(
+        det_layout="paragraph",
+        det_partial_page_prob=1.0,
+        det_partial_page_fill_range=(0.4, 0.4),
+        det_vertical_prob=0.0,  # a margin strip legitimately runs the full height
+    )
     page, polygons = PageGenerator(_cfg(tiny_font_dir, det_max_blocks=40, det_furniture_prob=0.0, **cfg)).generate_page(
         words
     )
@@ -882,17 +889,11 @@ def test_handwriting_filenames_have_no_invented_fallbacks():
     # unverified guess cannot rescue anything and guarantees a 404 on the way.
     from generator.components.font_downloader import _HANDWRITING_FONTS
 
-    known = {
-        "Caveat[wght].ttf",
-        "IndieFlower-Regular.ttf",
-        "ShadowsIntoLight.ttf",
-        "ArchitectsDaughter-Regular.ttf",
-        "PatrickHand-Regular.ttf",
-        "Kalam-Regular.ttf",
-    }
+    # Each family names exactly one file, checked to exist upstream (google/fonts ofl/).
     for faces in _HANDWRITING_FONTS.values():
-        for _family, filenames in faces:
-            assert set(filenames) <= known, filenames
+        for family, filenames in faces:
+            assert len(filenames) == 1, family
+            assert filenames[0].endswith(".ttf") and family == family.lower(), family
 
 
 def test_only_cjk_is_stacked_upright(tiny_font_dir):
@@ -1188,3 +1189,49 @@ def test_receipt_separator_rows_are_not_labelled(tiny_font_dir):
         _, polygons = pg.generate_page(WORDS)
         widest = max((max(pt[0] for pt in p) - min(pt[0] for pt in p) for p in polygons), default=0)
         assert widest < 0.9 * pg.config.detection.page_width_range[1]  # no full-width '=====' box
+
+
+def test_pictures_are_unlabelled_and_never_cover_words(tiny_font_dir):
+    for seed in range(5):
+        random.seed(seed)
+        np.random.seed(seed)
+        pg = PageGenerator(_cfg(tiny_font_dir, det_layout="paragraph", det_picture_prob=1.0, det_furniture_prob=0.0))
+        page = Image.new("RGBA", (400, 520), (255, 255, 255, 255))
+        polygons = []
+        pg._begin_page()
+        area = pg._place_picture(page, (20, 20, 380, 500), pg._word_supplier(WORDS), False, polygons)
+        top = area[1]
+        assert 20 < top < 500  # the text area now starts below the picture
+        picture_rows = np.asarray(page.convert("L"))[25:60, 25:375]
+        assert picture_rows.std() > 0 or picture_rows.mean() < 250  # something was drawn
+        assert all(min(pt[1] for pt in poly) > 20 for poly in polygons)  # only the caption is labelled
+
+
+def test_creased_sheet_negatives_are_photographed_on_a_surface(tiny_font_dir, monkeypatch):
+    import generator.components.page_generator as pgm
+
+    shots = []
+    real = pgm.apply_capture
+
+    def spy(cfg, page, polygons, budget=None, textured_prob=None):
+        shots.append(textured_prob)
+        return real(cfg, page, polygons, budget, textured_prob=textured_prob)
+
+    monkeypatch.setattr(pgm, "apply_capture", spy)
+    random.seed(3)
+    np.random.seed(3)
+    cfg = _cfg(tiny_font_dir, capture_prob=0.0)
+    cfg.explicit_options = frozenset()  # unpinned size: a capture may grow the frame
+    pg = PageGenerator(cfg)
+    real_choices = random.choices
+
+    def only_creased(population, weights=None, k=1):
+        if "creased_sheet" in population:
+            return ["creased_sheet"]
+        return real_choices(population, weights=weights, k=k)
+
+    monkeypatch.setattr(pgm.random, "choices", only_creased)
+    page, polygons = pg.generate_page(WORDS, negative=True)
+    assert polygons == [] and shots == [0.85]  # always a photo, mostly on cloth/wood/paper
+    lum = np.asarray(page.convert("L"), dtype=np.float32)
+    assert lum.std() > 8  # creases and the surface around the sheet, not a flat frame

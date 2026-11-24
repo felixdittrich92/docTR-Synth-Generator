@@ -4,7 +4,6 @@
 # See LICENSE or go to <https://opensource.org/licenses/Apache-2.0> for full license details.
 
 import os
-import random
 import tempfile
 import threading
 import urllib.parse
@@ -100,14 +99,78 @@ _SCRIPT_FONTS: dict[str, list[tuple[str, list[str]]]] = {
 # deliberately absent: an unverified fallback is only ever tried after the real
 # file has failed, so it cannot rescue anything and guarantees a 404 on the way.
 _HANDWRITING_FONTS: dict[str, list[tuple[str, list[str]]]] = {
+    # Everyday hands - neat print, rushed print, joined script - rather than
+    # display "fun" faces: filled-in forms, waybills and margin notes.
     "latin": [
         ("caveat", ["Caveat[wght].ttf"]),
         ("indieflower", ["IndieFlower-Regular.ttf"]),
         ("shadowsintolight", ["ShadowsIntoLight.ttf"]),
         ("architectsdaughter", ["ArchitectsDaughter-Regular.ttf"]),
         ("patrickhand", ["PatrickHand-Regular.ttf"]),
+        ("reeniebeanie", ["ReenieBeanie.ttf"]),
+        ("nothingyoucoulddo", ["NothingYouCouldDo.ttf"]),
+        ("coveredbyyourgrace", ["CoveredByYourGrace.ttf"]),
+        ("kalam", ["Kalam-Regular.ttf"]),
+        ("dekko", ["Dekko-Regular.ttf"]),
+        ("gochihand", ["GochiHand-Regular.ttf"]),
+        ("handlee", ["Handlee-Regular.ttf"]),
+        ("playpensans", ["PlaypenSans[wght].ttf"]),
     ],
-    "devanagari": [("kalam", ["Kalam-Regular.ttf"])],
+    "cyrillic": [
+        ("caveat", ["Caveat[wght].ttf"]),
+        ("badscript", ["BadScript-Regular.ttf"]),
+        ("marckscript", ["MarckScript-Regular.ttf"]),
+        ("neucha", ["Neucha.ttf"]),
+        ("pangolin", ["Pangolin-Regular.ttf"]),
+        ("playpensans", ["PlaypenSans[wght].ttf"]),
+    ],
+    "greek": [  # monotonic only: polytonic text stays printed
+        ("playpensans", ["PlaypenSans[wght].ttf"]),
+        ("kleeone", ["KleeOne-Regular.ttf"]),
+        ("zenkurenaido", ["ZenKurenaido-Regular.ttf"]),
+    ],
+    "arabic": [  # Ruqaa is the everyday Arabic hand
+        ("arefruqaa", ["ArefRuqaa-Regular.ttf"]),
+        ("playpensansarabic", ["PlaypenSansArabic[wght].ttf"]),
+    ],
+    "hebrew": [
+        ("playpensanshebrew", ["PlaypenSansHebrew[wght].ttf"]),
+        ("amaticsc", ["AmaticSC-Regular.ttf"]),
+    ],
+    "thai": [
+        ("itim", ["Itim-Regular.ttf"]),
+        ("sriracha", ["Sriracha-Regular.ttf"]),
+        ("mali", ["Mali-Regular.ttf"]),
+        ("charm", ["Charm-Regular.ttf"]),
+        ("playpensansthai", ["PlaypenSansThai[wght].ttf"]),
+    ],
+    "devanagari": [
+        ("kalam", ["Kalam-Regular.ttf"]),
+        ("playpensansdeva", ["PlaypenSansDeva[wght].ttf"]),
+    ],
+    "bengali": [
+        ("atma", ["Atma-Regular.ttf"]),
+        ("galada", ["Galada-Regular.ttf"]),
+    ],
+    "japanese": [
+        ("kleeone", ["KleeOne-Regular.ttf"]),
+        ("zenkurenaido", ["ZenKurenaido-Regular.ttf"]),
+        ("yomogi", ["Yomogi-Regular.ttf"]),
+    ],
+    "cjk": [  # Japanese faces cover jōyō kanji, Chinese ones simplified hanzi
+        ("kleeone", ["KleeOne-Regular.ttf"]),
+        ("zenkurenaido", ["ZenKurenaido-Regular.ttf"]),
+        ("yomogi", ["Yomogi-Regular.ttf"]),
+        ("mashanzheng", ["MaShanZheng-Regular.ttf"]),
+        ("longcang", ["LongCang-Regular.ttf"]),
+        ("zhimangxing", ["ZhiMangXing-Regular.ttf"]),
+    ],
+    "korean": [
+        ("nanumpenscript", ["NanumPenScript-Regular.ttf"]),
+        ("gaegu", ["Gaegu-Regular.ttf"]),
+        ("gamjaflower", ["GamjaFlower-Regular.ttf"]),
+        ("himelody", ["HiMelody-Regular.ttf"]),
+    ],
 }
 
 # A small, ordered fallback chain. Noto Sans (latin/greek/cyrillic) is tried
@@ -226,51 +289,23 @@ class FontDownloader:
                     return path
         return None
 
-    def resolve_handwriting(self, text: str) -> str | None:
-        """Return a handwriting face covering ``text``, or ``None``.
+    def handwriting_faces(self, script: str) -> list[str]:
+        """Every handwriting face listed for ``script``, downloaded once and then cached.
 
-        ``None`` is a normal outcome, not an error: most scripts have no
-        handwriting face here, and the caller falls back to a printed one.
+        Writers differ, so a crop picks among all of them rather than reusing
+        the first face that happened to be downloaded.
         """
         if not self.enabled:
-            return None
-        required_chars = {c for c in text if not c.isspace()}
-        if not required_chars:
-            return None
-        scripts = self.required_scripts(text) or {"latin"}
-        if len(scripts) != 1:
-            return None
-        candidates = _HANDWRITING_FONTS.get(next(iter(scripts)), [])
-        random.shuffle(candidates := list(candidates))
-        for family, filenames in candidates:
+            return []
+        faces = []
+        for family, filenames in _HANDWRITING_FONTS.get(script, []):
             for filename in filenames:
                 with _DOWNLOAD_LOCK:
                     path = self._download(family, filename)
-                if path is None:
-                    continue  # this filename is gone upstream; try the next one
-                # The file exists: whether it covers the text is a property of the
-                # face, so move to the next *family* rather than requesting more
-                # filenames from this one that would only 404.
-                return (
-                    path
-                    if self._covers(path, required_chars)
-                    else self._next_family(candidates, family, required_chars)
-                )
-        return None
-
-    def _next_family(self, candidates, after: str, required_chars: set[str]) -> str | None:
-        """Continue the search at the family following ``after``."""
-        remaining = candidates[[f for f, _ in candidates].index(after) + 1 :]
-        for family, filenames in remaining:
-            for filename in filenames:
-                with _DOWNLOAD_LOCK:
-                    path = self._download(family, filename)
-                if path is None:
-                    continue
-                if self._covers(path, required_chars):
-                    return path
-                break
-        return None
+                if path is not None:
+                    faces.append(path)
+                    break  # one file per family; further names would only 404
+        return faces
 
     def resolve(self, text: str) -> str | None:
         """Return a local font path that fully covers ``text``, downloading if needed.

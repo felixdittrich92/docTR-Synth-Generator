@@ -8,7 +8,7 @@ import random
 
 from fontTools.ttLib import TTFont
 
-from .font_downloader import FontDownloader
+from .font_downloader import _HANDWRITING_FONTS, FontDownloader
 from .shaping import ShapingChecker
 
 __all__ = ["FontSelector"]
@@ -53,6 +53,7 @@ class FontSelector:
         # rendered) but are excluded from ordinary printed-text resolution -
         # otherwise a downloaded script face leaks into body copy.
         self.handwriting_fonts: set[str] = set()
+        self._handwriting_scripts: set[str] = set()  # scripts whose faces are fetched
 
         if font_cache_dir is None:
             font_cache_dir = os.path.join(font_dir, "_downloaded") if font_dir else ".font_cache"
@@ -126,42 +127,33 @@ class FontSelector:
         return next((path for path in order if self.shaping.ok(text, path)), None)
 
     def get_handwriting_font(self, text: str) -> str | None:
-        """Get a handwriting face covering ``text``, or ``None`` if there is none.
+        """Get a random handwriting face covering ``text``, or ``None`` if there is none.
 
-        Local fonts whose filename marks them as handwriting are preferred; only
-        then is one downloaded. Returning ``None`` is expected for scripts with
-        no handwriting face available - callers fall back to a printed font.
+        With downloads enabled every listed face of the text's scripts is fetched
+        on first use (once, then cached), so crops vary across all of them.
+        Returning ``None`` is expected for scripts with no handwriting face -
+        callers fall back to a printed font.
         """
         required_chars = frozenset(c for c in text if not c.isspace())
+        if self.auto_download:
+            for script in (self.downloader.required_scripts(text) or set()) | {"latin"}:
+                if script in self._handwriting_scripts:
+                    continue
+                self._handwriting_scripts.add(script)
+                for path in self.downloader.handwriting_faces(script):
+                    if self._register_font(path):
+                        self.handwriting_fonts.add(path)
         local = [
             path
             for path, chars in self.font_support_table.items()
             if required_chars.issubset(chars) and (path in self.handwriting_fonts or self._looks_handwritten(path))
         ]
-        if local and (chosen := self._first_clean(text, local)):
-            return chosen
-        if not self.auto_download:
-            return None
-
-        key = ("__hand__", required_chars)
-        if key in self._text_font_cache:
-            return self._text_font_cache[key]
-        downloaded = self.downloader.resolve_handwriting(text)
-        if downloaded:
-            self._register_font(downloaded)
-            self.handwriting_fonts.add(downloaded)
-            if not self.shaping.ok(text, downloaded):
-                downloaded = None
-        self._text_font_cache[key] = downloaded
-        return downloaded
+        return self._first_clean(text, local) if local else None
 
     @staticmethod
     def _looks_handwritten(font_path: str) -> bool:
         name = os.path.basename(font_path).lower()
-        return any(
-            marker in name
-            for marker in ("caveat", "indieflower", "shadowsintolight", "architectsdaughter", "patrickhand", "kalam")
-        )
+        return any(family in name for faces in _HANDWRITING_FONTS.values() for family, _ in faces)
 
     def get_font_for_text(self, text: str) -> str | None:
         """Get a font that supports all characters in ``text``.

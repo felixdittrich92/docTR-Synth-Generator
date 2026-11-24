@@ -6,9 +6,10 @@
 """Turn a rendered page into a photographed capture.
 
 A rendered page on its own is a flatbed scan: axis-aligned, edge to edge, evenly
-lit. A phone capture is a *sheet of paper lying in a scene* - warped by
-perspective, resting on a surface, casting a shadow, lit unevenly and often
-slightly shaken. This module applies that transform to the page and carries the
+lit. A phone capture is a *sheet of paper lying in a scene* - bent, warped by
+perspective, resting on a surface, casting a shadow, lit unevenly (sometimes
+under the photographer's own shadow), colour-cast by the light and often slightly
+shaken. This module applies that transform to the page and carries the
 word polygons through the same homography so the labels stay exact.
 """
 
@@ -101,6 +102,17 @@ def _illuminate(config: GenerationConfig, image: Image.Image) -> Image.Image:
             dist2 = (xx - cx) ** 2 + (yy - cy) ** 2
             field *= 1.0 - strength + strength * np.exp(-dist2 / (2.0 * sigma**2))
 
+    if random.random() < cfg.partial_shadow_prob:
+        # The photographer's hand or phone: a soft-edged band across part of the
+        # frame, darker on one side of a slanted line.
+        angle = random.uniform(0, 2 * math.pi)
+        nx, ny = math.cos(angle), math.sin(angle)
+        offset = random.uniform(0.25, 0.75)
+        signed = (xx - 0.5) * nx + (yy - 0.5) * ny + 0.5 - offset
+        softness = random.uniform(0.03, 0.12)
+        inside = 1.0 / (1.0 + np.exp(-signed / softness))
+        field *= 1.0 - random.uniform(0.15, 0.35) * inside
+
     if random.random() < cfg.vignette_prob:
         dist2 = (xx - 0.5) ** 2 + (yy - 0.5) ** 2
         field *= 1.0 - cfg.vignette_strength * random.uniform(0.5, 1.0) * (dist2 / 0.5)
@@ -139,6 +151,61 @@ def _illuminate(config: GenerationConfig, image: Image.Image) -> Image.Image:
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGB")
 
 
+def _displacement(width: int, height: int, strength: float) -> np.ndarray:
+    """Vertical offset per column for a bent sheet: a sag/bulge, a lifting edge or a wave."""
+    amp = height * strength
+    t = np.linspace(0.0, 1.0, width, dtype=np.float32)
+    shape = random.random()
+    if shape < 0.4:  # the sheet sags or bulges between its edges
+        d = amp * (1.0 - (2.0 * t - 1.0) ** 2) * random.choice((-1.0, 1.0))
+    elif shape < 0.75:  # one edge lifts off the table (a page from a book or a stack)
+        start = random.uniform(0.45, 0.8)
+        d = -amp * np.clip((t - start) / (1.0 - start), 0.0, 1.0) ** 2
+        if random.random() < 0.5:
+            d = d[::-1]
+    else:  # a gently rippled, once-folded sheet
+        freq, phase = random.uniform(0.6, 1.6), random.uniform(0, 2 * math.pi)
+        d = 0.5 * amp * np.sin(2.0 * math.pi * freq * t + phase)
+    return d - d.min()
+
+
+def _curl(page: Image.Image, polygons: list[Polygon], strength: float) -> tuple[Image.Image, list[Polygon]]:
+    """Bend the flat sheet before it is photographed, and carry the polygons along.
+
+    Paper on a desk is never perfectly flat; a phone photo shows its text lines
+    bowing. Each column is shifted vertically by a smooth displacement, so a word's
+    corners move with the line they sit on.
+    """
+    width, height = page.size
+    d = _displacement(width, height, strength)
+    pad = int(math.ceil(float(d.max()))) + 2
+    out_h = height + pad
+    strips = 32
+    xs = np.linspace(0, width, strips + 1).round().astype(int)
+    mesh = []
+    for x0, x1 in zip(xs[:-1], xs[1:]):
+        if x1 <= x0:
+            continue
+        d0, d1 = float(d[min(x0, width - 1)]), float(d[min(x1, width - 1)])
+        # output strip -> source quad (NW, SW, SE, NE)
+        quad = (x0, -d0, x0, out_h - d0, x1, out_h - d1, x1, -d1)
+        mesh.append(((int(x0), 0, int(x1), out_h), quad))
+    bent = page.convert("RGBA").transform(
+        (width, out_h), Image.Transform.MESH, mesh, resample=Image.Resampling.BICUBIC, fillcolor=(0, 0, 0, 0)
+    )
+    last = width - 1
+    moved = [[[x, y + float(d[min(max(int(round(x)), 0), last)])] for x, y in poly] for poly in polygons]
+    return bent, moved
+
+
+def _colour_cast(image: Image.Image, strength: float) -> Image.Image:
+    """White balance of a phone camera under warm (tungsten) or cool (daylight, LED) light."""
+    warmth = random.uniform(-1.0, 1.0) * strength
+    gains = np.array([1.0 + warmth, 1.0 + random.uniform(-0.3, 0.3) * strength, 1.0 - warmth], dtype=np.float32)
+    arr = np.asarray(image, dtype=np.float32) * gains
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
 def _motion_blur(image: Image.Image, length: int, angle: float) -> Image.Image:
     """Directional blur, as from camera shake (not the isotropic lens blur)."""
     arr = np.asarray(image, dtype=np.float32)
@@ -164,6 +231,8 @@ def apply_capture(
     pixel-exact no matter how strong the perspective is.
     """
     cfg = config.capture
+    if random.random() < cfg.curl_prob:
+        page, polygons = _curl(page, polygons, random.uniform(*cfg.curl_strength_range))
     width, height = page.size
 
     # 1. Where the sheet lands in the frame: centred, rotated, corners jittered.
@@ -217,8 +286,10 @@ def apply_capture(
     scene.alpha_composite(warped)
     scene = scene.convert("RGB")
 
-    # 3. Lighting and camera shake.
+    # 3. Lighting, white balance and camera shake.
     scene = _illuminate(config, scene)
+    if random.random() < cfg.colour_cast_prob:
+        scene = _colour_cast(scene, cfg.colour_cast_strength)
     if random.random() < cfg.motion_blur_prob:
         length = random.randint(*cfg.motion_blur_length_range)
         if budget is not None:

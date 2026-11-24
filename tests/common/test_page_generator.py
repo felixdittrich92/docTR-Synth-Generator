@@ -1034,7 +1034,15 @@ def _baseline_font(path):
 
 def _paragraph_lines(tmp_path, words):
     _baseline_font(str(tmp_path / "Baseline.ttf"))
-    cfg = _cfg(str(tmp_path), det_layout="paragraph", det_heading_prob=0.0, det_vertical_prob=0.0, det_max_blocks=1)
+    # No furniture: a page number added after the body would read as an extra "line".
+    cfg = _cfg(
+        str(tmp_path),
+        det_layout="paragraph",
+        det_heading_prob=0.0,
+        det_vertical_prob=0.0,
+        det_max_blocks=1,
+        det_furniture_prob=0.0,
+    )
     cfg.realism.rotation_prob = cfg.realism.perspective_prob = 0.0
     pg = PageGenerator(cfg)
     pg.config.detection.punctuation_prob = 0.0
@@ -1065,17 +1073,45 @@ def test_tall_lines_never_overlap(tmp_path):
         assert max(pt[1] for p in upper for pt in p) < min(pt[1] for p in lower for pt in p)
 
 
-def test_id_card_mrz_stays_on_the_card(tiny_font_dir, monkeypatch):
-    pg = PageGenerator(_cfg(tiny_font_dir, det_layout="id_card"))
-    # A face twice as wide as the MRZ sizing assumes.
-    original = pg.text_renderer.render_coverage
+def test_id_card_mrz_stays_on_the_card(tmp_path, monkeypatch):
+    import string
 
-    def wide(text, font_path, font_size, bold_width=0):
-        img = original(text, font_path, font_size, bold_width)
-        return img.resize((img.width * 2, img.height)) if "<" in text else img
+    from conftest import _build_tiny_font
 
-    monkeypatch.setattr(pg.text_renderer, "render_coverage", wide)
+    # The MRZ needs '<', which the shared tiny font does not have.
+    _build_tiny_font(str(tmp_path / "Mrz-Regular.ttf"), string.ascii_letters + string.digits + " .,-<")
+    drawn = 0
+    for seed in range(6):
+        random.seed(seed)
+        np.random.seed(seed)
+        pg = PageGenerator(_cfg(str(tmp_path), det_layout="id_card"))
+        original = pg.text_renderer.render_coverage
+
+        def wide(text, font_path, font_size, bold_width=0, original=original):
+            # A face twice as wide as the MRZ sizing assumes.
+            img = original(text, font_path, font_size, bold_width)
+            return img.resize((img.width * 2, img.height)) if "<" in text else img
+
+        monkeypatch.setattr(pg.text_renderer, "render_coverage", wide)
+        page, polygons = pg.generate_page(WORDS)
+        assert all(max(pt[0] for pt in p) < page.width for p in polygons)  # nothing runs off the card/page
+        drawn += any(max(pt[0] for pt in p) - min(pt[0] for pt in p) > page.width * 0.3 for p in polygons)
+    assert drawn >= 3  # the MRZ is shortened to fit, not dropped
+
+
+def test_occluded_words_lose_their_hidden_part():
+    word = [[0, 0], [100, 0], [100, 20], [0, 20]]
+    clipped = PageGenerator._occlude([word], (80, -5, 140, 40))  # a banner over its last fifth
+    assert clipped == [[[0, 0], [80, 0], [80, 20], [0, 20]]]
+    assert PageGenerator._occlude([word], (10, -5, 140, 40)) == []  # mostly hidden: no label
+    assert PageGenerator._occlude([word], (200, 0, 240, 40)) == [word]  # untouched
+
+
+def test_punch_holes_sit_in_the_margin_without_hiding_labels(tiny_font_dir):
+    random.seed(4)
+    pg = PageGenerator(_cfg(tiny_font_dir, det_layout="paragraph", det_punch_hole_prob=1.0))
     page, polygons = pg.generate_page(WORDS)
-    mrz = [p for p in polygons if max(pt[0] for pt in p) - min(pt[0] for pt in p) > page.width * 0.3]
-    assert all(max(pt[0] for pt in p) < page.width for p in polygons)
-    assert mrz  # still drawn, just shorter
+    arr = np.asarray(page.convert("L"))
+    column = arr[:, : int(page.width * 0.06)]
+    assert (column < 80).any() or (column > 220).any()  # a hole was drawn in the margin
+    assert polygons

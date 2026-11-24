@@ -164,10 +164,21 @@ class RecognitionConfig:
     Attributes:
         font_size_range: range of font sizes for recognition crops.
         padding: padding (pixels) around the text in a crop.
+        margin_prob / margin_range: chance and size (as a share of the text height,
+            per side) of extra margin around the word. Crops in the wild come from
+            detector boxes, which are expanded around the ink and never sit exactly
+            on it.
+        context_prob: chance the margin carries what real crops pick up from the page
+            around a word - the cut-off descenders of the line above, the tops of the
+            line below, an underline or a table rule. Fragments always run off the
+            crop edge, so they cannot be read as extra characters.
     """
 
     font_size_range: tuple[int, int] = (12, 40)
     padding: int = 2
+    margin_prob: float = 0.7
+    margin_range: tuple[float, float] = (0.0, 0.3)
+    context_prob: float = 0.35
 
 
 @dataclass
@@ -191,6 +202,9 @@ class RealismConfig:
             paper, net of the paper's own texture (see
             :func:`~generator.components.legibility.local_ink_contrast`). An
             unreadable crop with a label is pure noise for a recogniser. 0 disables.
+        grayscale_prob / bitonal_prob: share of crops and pages delivered in grayscale
+            or black-and-white, as office scanners, copiers, fax machines and the
+            "B&W" mode of scanner apps produce them (see ``components/scan.py``).
         min_ink_separation: guaranteed luminance separation between ink and paper
             *after* opacity is applied. Contrast, hue scaling, jitter and opacity
             each look reasonable alone and compound into invisible text.
@@ -218,6 +232,8 @@ class RealismConfig:
     min_ink_separation: float = 62.0
     crop_texture_std: float = 10.0
     min_local_contrast: float = 30.0
+    grayscale_prob: float = 0.2
+    bitonal_prob: float = 0.06
     max_contrast: float = 0.95
     invert_prob: float = 0.15
     bold_prob: float = 0.3
@@ -308,6 +324,7 @@ class DetectionConfig:
         handwriting_prob: probability a form/receipt value is written by hand.
         furniture_prob: probability a page carries furniture - header/footer with
             a page number, a stamp, a signature, a redaction bar, a logo.
+        punch_hole_prob: chance a text page carries two filing holes in its left margin.
         stamp_prob / redaction_prob / signature_prob / logo_prob: the mix of
             furniture, conditional on ``furniture_prob``.
         edge_truncation_prob: probability a block bleeds past the margin so words
@@ -370,6 +387,7 @@ class DetectionConfig:
     receipt_height_range: tuple[int, int] = (900, 1800)
     handwriting_prob: float = 0.35
     furniture_prob: float = 0.3
+    punch_hole_prob: float = 0.06
     stamp_prob: float = 0.15
     redaction_prob: float = 0.12
     signature_prob: float = 0.2
@@ -401,6 +419,13 @@ class CaptureConfig:
         min_contrast_factor: the least local contrast lighting may leave, as a
             fraction of the original. Falloff and glare each scale contrast, and
             the product is what erases text, so the pair is bounded together.
+        curl_prob / curl_strength_range: chance the sheet is bent (sagging, an edge
+            lifting, a gentle ripple) and the largest vertical displacement as a
+            share of the page height. Text lines then bow, as on any phone photo.
+        partial_shadow_prob: chance of a soft-edged shadow (hand, phone) across
+            part of the frame; bounded by ``min_contrast_factor`` like all lighting.
+        colour_cast_prob / colour_cast_strength: chance and size of a warm or cool
+            white-balance shift.
         surface_tone_range: brightness range of the generated surface the sheet
             rests on (a *generated* surface, never a photo, so no unlabelled
             text can leak into the frame).
@@ -422,6 +447,11 @@ class CaptureConfig:
     motion_blur_prob: float = 0.15
     motion_blur_length_range: tuple[int, int] = (3, 9)
     surface_tone_range: tuple[int, int] = (55, 205)
+    curl_prob: float = 0.6
+    curl_strength_range: tuple[float, float] = (0.004, 0.02)
+    partial_shadow_prob: float = 0.25
+    colour_cast_prob: float = 0.6
+    colour_cast_strength: float = 0.07
     min_contrast_factor: float = 0.68
 
 

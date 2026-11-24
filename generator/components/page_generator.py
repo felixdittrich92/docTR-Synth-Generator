@@ -19,6 +19,7 @@ from .config import GenerationConfig
 from .font_selector import FontSelector
 from .legibility import DegradationBudget
 from .media import PageMedia, apply_delivery_resample, media_for_pinned_size, sample_media
+from .scan import MIN_BITONAL_PAGE_TEXT_PX, apply_scan_tone
 from .text_renderer import TextRenderer, TextStyle
 from .text_styling import (
     PagePalette,
@@ -84,6 +85,7 @@ class PageGenerator:
         self._rtl_page = False
         self._min_text_px = float("inf")
         self._media: PageMedia | None = None
+        self._has_vertical_regions = False
 
     # -- layout -----------------------------------------------------------
 
@@ -126,6 +128,7 @@ class PageGenerator:
         # Carve vertical strips out of the content area *before* the body is laid
         # out, so vertical and horizontal text can never overlap.
         area, vertical_regions = self._plan_vertical_regions(area, layout)
+        self._has_vertical_regions = bool(vertical_regions)
         if layout in ("paragraph", "newspaper", "table") and random.random() < cfg.detection.partial_page_prob:
             # The last page of a letter or report: the body stops part-way down.
             lo, hi = cfg.detection.partial_page_fill_range
@@ -148,6 +151,9 @@ class PageGenerator:
 
         for region in vertical_regions:
             self._draw_vertical_region(page, region, take_word, polygons)
+
+        if layout in ("paragraph", "table", "form", "newspaper") and random.random() < cfg.detection.punch_hole_prob:
+            self._punch_holes(page, margin, polygons)
 
         if layout not in ("id_card", "receipt") and random.random() < cfg.detection.furniture_prob:
             self._add_furniture(page, (margin, margin, width - margin, height - margin), take_word, rtl, polygons)
@@ -184,6 +190,8 @@ class PageGenerator:
         page = apply_final_degradations(
             cfg, page, self.final_augs, DegradationBudget.for_text_height(delivered, already_softened=softened)
         )
+        # Colour, grayscale or black-and-white - B&W only if every word survives it.
+        page = apply_scan_tone(cfg, page, polygons, text_height=delivered, min_text_px=MIN_BITONAL_PAGE_TEXT_PX)
         return page, polygons
 
     # -- layout building blocks ------------------------------------------
@@ -192,14 +200,16 @@ class PageGenerator:
         cfg = self.config
         if cfg.detection.layout != "mixed":
             return cfg.detection.layout
+        # Roughly as documents occur in the wild: mostly running text, forms and
+        # tables; ID cards and fully vertical pages are a small share.
         weights = cfg.detection.layout_weights or {
-            "paragraph": 0.24,
-            "newspaper": 0.18,
-            "form": 0.14,
-            "id_card": 0.12,
-            "vertical": 0.10,
-            "table": 0.14,
-            "receipt": 0.08,
+            "paragraph": 0.30,
+            "newspaper": 0.16,
+            "form": 0.16,
+            "id_card": 0.07,
+            "vertical": 0.05,
+            "table": 0.16,
+            "receipt": 0.10,
         }
         names = list(weights)
         return random.choices(names, weights=[weights[n] for n in names], k=1)[0]
@@ -501,7 +511,7 @@ class PageGenerator:
             ry = random.randint(by0, max(by0, by1 - fs * 2))
             bar = (rx0, ry, min(bx1, rx0 + rw), ry + int(fs * 1.3))
             draw.rectangle(bar, fill=(20, 20, 24))
-            polygons[:] = [p for p in polygons if not self._mostly_inside(p, bar)]
+            polygons[:] = self._occlude(polygons, bar)
 
         if random.random() < cfg.signature_prob:
             self._draw_signature(draw, area)
@@ -521,6 +531,59 @@ class PageGenerator:
             if max(cxs) - min(cxs) < 2 or max(cys) - min(cys) < 2:
                 continue  # a sliver of a glyph is not a usable label
             kept.append(clipped)
+        return kept
+
+    def _punch_holes(self, page, margin: int, polygons: list[Polygon]) -> None:
+        """Two filing holes in the left margin (ISO 838: 80 mm apart on A4), showing the lid behind."""
+        width, height = page.size
+        radius = max(3, int(width * random.uniform(0.012, 0.016)))
+        cx = int(min(margin * random.uniform(0.35, 0.6), width * 0.06))
+        if cx - radius < 1:
+            return
+        gap = height * 80.0 / 297.0
+        centre = height / 2.0 + random.uniform(-0.03, 0.03) * height
+        lid = random.choice([random.randint(15, 60), random.randint(225, 250)])
+        draw = ImageDraw.Draw(page)
+        for cy in (centre - gap / 2.0, centre + gap / 2.0):
+            box = (cx - radius, int(cy) - radius, cx + radius, int(cy) + radius)
+            draw.ellipse(box, fill=(lid, lid, lid, 255), outline=(max(0, lid - 40),) * 3 + (255,))
+            polygons[:] = self._occlude(polygons, box)
+
+    @staticmethod
+    def _occlude(polygons: list[Polygon], box) -> list[Polygon]:
+        """Labels after an opaque shape is painted over ``box``.
+
+        A word mostly under it is gone; one it only clips keeps the box of its
+        visible part, so a label never covers ink that is no longer there.
+        """
+        rx0, ry0, rx1, ry1 = box
+        kept: list[Polygon] = []
+        for poly in polygons:
+            xs = [pt[0] for pt in poly]
+            ys = [pt[1] for pt in poly]
+            px0, px1, py0, py1 = min(xs), max(xs), min(ys), max(ys)
+            if px1 <= rx0 or px0 >= rx1 or py1 <= ry0 or py0 >= ry1:
+                kept.append(poly)
+                continue
+            # The largest visible remainder on any side of the box.
+            sides = [
+                (rx0 - px0) * (py1 - py0),  # left of it
+                (px1 - rx1) * (py1 - py0),  # right of it
+                (ry0 - py0) * (px1 - px0),  # above it
+                (py1 - ry1) * (px1 - px0),  # below it
+            ]
+            best = max(range(4), key=lambda i: sides[i])
+            if sides[best] < 0.5 * (px1 - px0) * (py1 - py0):
+                continue  # mostly hidden: no label
+            if best == 0:
+                px1 = rx0
+            elif best == 1:
+                px0 = rx1
+            elif best == 2:
+                py1 = ry0
+            else:
+                py0 = ry1
+            kept.append([[px0, py0], [px1, py0], [px1, py1], [px0, py1]])
         return kept
 
     @staticmethod
@@ -852,6 +915,7 @@ class PageGenerator:
         if random.random() < cfg.vertical_banner_prob:
             band = random.choice([(38, 62, 120), (28, 90, 70), (120, 40, 48), (60, 55, 80), (35, 35, 42)])
             ImageDraw.Draw(page).rectangle((rx0, ry0, rx1, ry1), fill=band)
+            polygons[:] = self._occlude(polygons, (rx0, ry0, rx1, ry1))
 
         # A rotated word occupies ~1.3x the font size across the column.
         font_size = max(self._min_font(), min(int(width / 1.45), cfg.font_size_range[1]))
@@ -1033,7 +1097,9 @@ class PageGenerator:
     def _layout_paragraph(self, page, area, take_word, rtl, polygons) -> None:
         cfg = self.config
         bx0, by0, bx1, by1 = area
-        if random.random() < cfg.detection.edge_truncation_prob:
+        # Run past the margin only where the margin is the page edge: a reserved
+        # vertical strip would be painted over the overflowing words.
+        if not self._has_vertical_regions and random.random() < cfg.detection.edge_truncation_prob:
             # Let the block run past the margin so words are clipped by the page
             # edge. Every word used to sit fully inside the margins, so the model
             # never saw a partial glyph - common on any hand-held capture.
@@ -1608,11 +1674,14 @@ class PageGenerator:
         for _ in range(2):
             # 0.62 em is a guess at the face's advance; a wider face would run the
             # line past the card edge, so shorten it until it fits.
-            for _attempt in range(6):
+            for _attempt in range(4):
                 mrz = "".join(random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<<<<") for _ in range(n_chars))
                 if self._place_token(page, mrz, cx0 + pad, my, mfs, mstyle, 0, polygons, max_width=avail):
                     break
-                n_chars = max(8, int(n_chars * 0.88))
+                probe = self._render_word(mrz, mfs, 0)
+                if probe is None:
+                    break
+                n_chars = max(8, int(n_chars * avail / probe.width * 0.97))
             my += int(mfs * 1.15)
 
     @staticmethod
@@ -1696,11 +1765,14 @@ class PageGenerator:
     def _rotate(page: Image.Image, polygons: list[Polygon], angle: float) -> tuple[Image.Image, list[Polygon]]:
         """Rotate the page and its polygons together about the page centre."""
         width, height = page.size
+        # The corners a skewed scan uncovers show the scanner lid: usually white,
+        # often grey or black (document feeders, a lid left open).
+        lid = random.choices([255, random.randint(175, 225), random.randint(15, 60)], weights=[0.6, 0.15, 0.25])[0]
         rotated = page.rotate(
             angle,
             expand=True,
             resample=Image.Resampling.BICUBIC,
-            fillcolor=(255, 255, 255),
+            fillcolor=(lid, lid, lid),
         )
         new_w, new_h = rotated.size
         cx, cy = width / 2.0, height / 2.0

@@ -16,8 +16,11 @@ in ~100 languages and 24 scripts.
 - **Labels that match the pixels** - every word is shaped with HarfBuzz before a font is used for it, so no
   crop shows a tofu box, a dotted circle or an empty glyph its label doesn't mention.
 - **Complete vocab coverage** - every character of the docTR vocab you train on appears in train *and* val.
-- **Realistic documents** - paragraphs, newspapers, forms, tables, receipts, ID cards and vertical CJK text,
-  printed on real paper sizes, scanned or photographed, with stamps, handwriting and barcodes.
+- **Realistic documents** - paragraphs, newspapers, forms, tables, receipts, ID cards and vertical CJK text
+  on real paper sizes, with stamps, handwriting, barcodes and punch holes; scanned in colour, grayscale or
+  black-and-white, or photographed (bent sheets, perspective, uneven light, shadows, colour casts).
+- **Crops like a detector cuts them** - recognition crops carry real margins and the cut-off edges of
+  neighbouring lines and table rules, as crops from real pages do.
 - **docTR-ready** - writes the folder layout docTR's training scripts read, or plugs into them on the fly.
 
 ## Installation
@@ -92,6 +95,9 @@ The options you are most likely to change:
 | `det_furniture_prob` | `0.3` | headers, page numbers, stamps, logos, barcodes, signatures |
 | `det_handwriting_prob` | `0.35` | chance a form or receipt value is hand-written |
 | `capture_prob` | `0.35` | chance a page is photographed (perspective, shadow, lighting) rather than scanned |
+| `capture_curl_prob` | `0.6` | chance a photographed sheet is bent, so its text lines bow |
+| `grayscale_prob` / `bitonal_prob` | `0.2` / `0.06` | crops and pages delivered in grayscale or black-and-white (fax, copier, scanner apps) |
+| `context_prob` | `0.35` | recognition: crop margins show cut-off neighbouring lines or table rules |
 | `media_dpi_range` | `(150, 300)` | scan resolution of the physical page |
 | `min_local_contrast` | `30.0` | recognition: re-draw a crop until every part of the word is readable |
 | `language_balance` | `"balanced"` | `"balanced"` or `"proportional"` split across languages |

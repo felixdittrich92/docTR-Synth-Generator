@@ -103,11 +103,13 @@ GROUP_SHARE = {
 LANG_MULT = {"en": 3.0, "zh": 1.2, "ja": 1.2, "ko": 0.8, "grc": 0.4, "sah": 0.5, "cnr": 0.5,
              "uz-Cyrl": 0.7, "qu": 0.5, "mi": 0.5, "jv": 0.5, "su": 0.5, "ckb": 0.7}  # fmt: skip
 
-# Vertical typesetting is normal for Chinese/Japanese, rare elsewhere.
-LAYOUT_DEFAULT = {"paragraph": 0.30, "newspaper": 0.12, "form": 0.18, "id_card": 0.14,
-                  "vertical": 0.03, "table": 0.13, "receipt": 0.10}  # fmt: skip
-LAYOUT_CJK_VERTICAL = {"paragraph": 0.22, "newspaper": 0.18, "form": 0.11, "id_card": 0.08,
-                       "vertical": 0.25, "table": 0.10, "receipt": 0.06}  # fmt: skip
+# Layout mix, roughly as documents occur in the wild: mostly running text, forms and
+# tables; ID cards and receipts are a small share. Vertical typesetting is normal for
+# Chinese and Japanese, rare elsewhere.
+LAYOUT_DEFAULT = {"paragraph": 0.34, "newspaper": 0.12, "form": 0.18, "table": 0.16,
+                  "receipt": 0.08, "id_card": 0.07, "vertical": 0.03}  # fmt: skip
+LAYOUT_CJK_VERTICAL = {"paragraph": 0.24, "newspaper": 0.18, "form": 0.12, "table": 0.11,
+                       "receipt": 0.06, "id_card": 0.04, "vertical": 0.25}  # fmt: skip
 CJK_VERTICAL = {"ja", "zh"}
 
 

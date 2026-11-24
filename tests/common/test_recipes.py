@@ -222,6 +222,9 @@ def test_recognition_recipe_end_to_end(tmp_path, temp_image_dir):
     recognition.prepare(args)
     vocab = (tmp_path / "ds" / "meta" / "vocab.txt").read_text(encoding="utf-8")
     assert set(vocab) == set(VOCABS["english"])
+    # Real crops are full of short words ('of', 'my', '1'); they must reach the pool.
+    rows = recognition._read_tsv(tmp_path / "ds" / "meta" / "train_labels.tsv")
+    assert sum(len(t.strip("()\"'.,;:!?")) <= 3 for _, t in rows) / len(rows) > 0.15
 
     recognition.render(args)
     assert recognition.verify(args)  # every vocab character is in the rendered labels

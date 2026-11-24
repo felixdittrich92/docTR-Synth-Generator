@@ -70,12 +70,13 @@ MAX_LONG_EDGE = 1600
 # docTR trains detection at --input_size 1024 (long edge). Body text on a real A4 scan
 # is ~10-12 px tall there and footnotes ~6 px; below ~5 px print is no longer legible.
 # A page is re-rolled when more than MAX_TINY_SHARE of its words fall below MIN_TEXT_PX,
-# or when it carries more than MAX_BOXES_PER_PAGE words (a wall of fine print, which
+# or when it carries more than MAX_BOXES_PER_PAGE words (denser than real forms, letters
+# and reports - FUNSD's densest pages hold ~300 - and a wall of fine print, which
 # also costs ~45 bytes per box in labels.json).
 TRAIN_INPUT_SIZE = 1024
 MIN_TEXT_PX = 5.0
 MAX_TINY_SHARE = 0.03
-MAX_BOXES_PER_PAGE = 1000
+MAX_BOXES_PER_PAGE = 800
 PAGE_ATTEMPTS = 4
 # Typography presets: (body points, fine-print prob, newspaper px, max blocks, table rows,
 # newspaper columns). docTR's DetectionDataset holds every box in RAM, so this is the main

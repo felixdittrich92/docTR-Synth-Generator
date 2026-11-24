@@ -101,6 +101,15 @@ LANG_MULT = {"en": 2.5, "grc": 0.4, "sah": 0.5, "cnr": 0.5, "uz-Cyrl": 0.7,
 VAL_WORD_FRACTION = 0.03  # unique words held out per language: val shares no word with train
 MIN_VAL_WORDS = 150
 NUMERIC_RATIO = 0.12  # prices, dates, codes ... (share of all samples)
+# Share of each language's samples drawn from its short words (<= 3 characters).
+# Real crops are full of them - 'of', 'to', 'TO:', 'x', 'No' are ~18% of FUNSD and CORD
+# words - but they are a few hundred of ~150k unique words, so even sampling over the
+# vocabulary would almost never show one.
+SHORT_SHARE = 0.25
+SHORT_MAX_LEN = 3
+# Short words are taken from the head of the frequency list and drawn Zipf-weighted:
+# the short *tail* of a list is mostly junk ('s01', 'qin'), its head is 'of', 'to', 'a'.
+SHORT_TOP_RANKS = 5000
 NATIVE_DIGIT_PROB = 0.4
 UPPER_PROB, TITLE_PROB = 0.08, 0.25
 TITLE_PROB_OVERRIDE = {"de": 0.45, "lb": 0.45}  # nouns are capitalised; the lists are lower-cased
@@ -275,14 +284,50 @@ def prepare(args) -> None:
     held_out = {w.casefold() for ws in val_words.values() for w in ws}
     for lang in train_words:
         train_words[lang] = [w for w in train_words[lang] if w.casefold() not in held_out]
+    # Frequent short words per split, in frequency order (the pools keep rank order).
+    short_words: dict[str, dict[str, list[str]]] = {"train": {}, "val": {}}
+    for lang in langs:
+        head = [w for w in pools[lang][:SHORT_TOP_RANKS] if len(w) <= SHORT_MAX_LEN]
+        val_set = {w.casefold() for w in val_words[lang]}
+        short_words["val"][lang] = [w for w in head if w.casefold() in val_set]
+        short_words["train"][lang] = [w for w in head if w.casefold() not in held_out]
 
     weights = group_weights({k: len(v) for k, v in train_words.items() if v})
     n_num_train, n_num_val = round(args.num_train * NUMERIC_RATIO), round(args.num_val * NUMERIC_RATIO)
     q_train = quotas(weights, args.num_train - n_num_train)
     q_val = quotas(weights, args.num_val - n_num_val)
 
-    def build(words_by_lang: dict[str, list[str]], q: dict[str, int], n_num: int, floor: int) -> list[tuple[str, str]]:
-        out = [(lang, w) for lang, ws in words_by_lang.items() for w in cycle_sample(ws, q.get(lang, 0), rng)]
+    def short_tokens(lang: str, ranked: list[str], n: int) -> list[str]:
+        """``n`` short tokens: frequent short words (Zipf-weighted) and small numbers."""
+        if n <= 0:
+            return []
+        cs = charsets[lang]
+        n_num = n // 4 if ranked else n
+        out = []
+        if ranked:
+            weights = [1.0 / (rank + 1) for rank in range(len(ranked))]
+            title_p = TITLE_PROB_OVERRIDE.get(lang, TITLE_PROB)
+            for w in rng.choices(ranked, weights=weights, k=n - n_num):
+                w = random_case(w, lang, cs, rng, UPPER_PROB, title_p)
+                out.append(attach_punct(w, lang, cs, rng) if rng.random() < PUNCT_PROB * 2 else w)
+        # Quantities, item and page numbers: '1', '12', '3.', '(2)'.
+        systems = native_digit_systems(lang, cs)
+        for _ in range(n_num):
+            t = str(rng.choice([rng.randint(0, 9), rng.randint(10, 99)])) + rng.choice(["", "", "", ".", ")", "x"])
+            if systems and rng.random() < NATIVE_DIGIT_PROB:
+                t = t.translate({ord(k): v for k, v in rng.choice(systems).items()})
+            out.append(t if set(t) <= cs else t.rstrip(".)x"))
+        return [t for t in out if t and set(t) <= cs]
+
+    def build(
+        words_by_lang: dict[str, list[str]], q: dict[str, int], n_num: int, floor: int, split: str
+    ) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for lang, ws in words_by_lang.items():
+            n = q.get(lang, 0)
+            n_short = round(n * SHORT_SHARE)
+            out += [(lang, t) for t in short_tokens(lang, short_words[split].get(lang, []), n_short)]
+            out += [(lang, w) for w in cycle_sample(ws, n - n_short, rng)]
         num_w = {lang: weights[lang] for lang in words_by_lang}
         for lang, n in quotas(num_w, n_num).items():
             out += [(lang, t) for t in numeric_tokens(lang, n, charsets[lang], rng, NATIVE_DIGIT_PROB)]
@@ -335,11 +380,15 @@ def prepare(args) -> None:
         return pool, n_added
 
     print("Sampling pools and completing vocab coverage ...")
-    train = build(train_words, q_train, n_num_train, args.min_char_count)
+    train = build(train_words, q_train, n_num_train, args.min_char_count, "train")
     train += symbols_in_context(train, train_words, args.min_char_count)
     train, n_tr = complete(train, args.min_char_count, SEED)
     train_texts = {t for _, t in train}
-    val = [(lang, t) for lang, t in build(val_words, q_val, n_num_val, args.min_char_count_val) if t not in train_texts]
+    val = [
+        (lang, t)
+        for lang, t in build(val_words, q_val, n_num_val, args.min_char_count_val, "val")
+        if t not in train_texts
+    ]
     val += symbols_in_context(val, val_words, args.min_char_count_val)
     val, n_va = complete(val, args.min_char_count_val, SEED + 1)
     rng.shuffle(train)

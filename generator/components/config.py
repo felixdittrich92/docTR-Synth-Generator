@@ -224,7 +224,7 @@ class RealismConfig:
     supersample: int = 3
     text_opacity_range: tuple[int, int] = (200, 255)
     ink_color_jitter: float = 12.0
-    colored_ink_prob: float = 0.25
+    colored_ink_prob: float = 0.12
     outline_prob: float = 0.05
     outline_width_frac_range: tuple[float, float] = (0.02, 0.045)
     min_contrast: float = 0.45
@@ -232,8 +232,8 @@ class RealismConfig:
     min_ink_separation: float = 62.0
     crop_texture_std: float = 10.0
     min_local_contrast: float = 30.0
-    grayscale_prob: float = 0.2
-    bitonal_prob: float = 0.06
+    grayscale_prob: float = 0.3
+    bitonal_prob: float = 0.08
     max_contrast: float = 0.95
     invert_prob: float = 0.15
     bold_prob: float = 0.3
@@ -249,7 +249,7 @@ class RealismConfig:
     final_blur_prob: float = 0.1
     final_blur_radius_range: tuple[float, float] = (0.3, 1.2)
     noise_prob: float = 0.1
-    noise_std_range: tuple[float, float] = (2.0, 12.0)
+    noise_std_range: tuple[float, float] = (2.0, 8.0)
     jpeg_prob: float = 0.3
     jpeg_quality_range: tuple[int, int] = (35, 92)
     brightness_jitter: float = 0.12

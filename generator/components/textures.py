@@ -185,7 +185,9 @@ def crease_shading(
                 * np.clip(1 - along / length, 0, 1)
             )
         height += _smooth_noise(h, w, max(w, h) / 6) * 20 * crumple
-    gy, gx = np.gradient(height)
+    grad_y, grad_x = np.gradient(height)
+    gx: np.ndarray = grad_x  # widened below by the facet slopes
+    gy: np.ndarray = grad_y
     if crumple > 0:
         fx, fy = _facets(h, w, int(random.uniform(25, 70) * crumple) + 6)
         gx, gy = gx + 0.25 * crumple * fx, gy + 0.25 * crumple * fy

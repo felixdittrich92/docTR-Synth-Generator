@@ -76,8 +76,8 @@ class BackgroundManager:
             self._cache.move_to_end(path)
             return cached
         try:
-            with Image.open(path) as bg:
-                bg = bg.convert("RGB")
+            with Image.open(path) as src:
+                bg = src.convert("RGB")
                 longest = max(bg.size)
                 if self.max_dimension and longest > self.max_dimension:
                     scale = self.max_dimension / longest

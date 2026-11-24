@@ -6,12 +6,13 @@
 
 """Render the README example image from two prepared recipe builds.
 
-    python -m generator.recipes.detection prepare --languages en,de,pl,ar,ru,hi,ja,he --out /tmp/det
+    python -m generator.recipes.detection prepare --languages en,de,ru,ar,hi,ja,he,el --out /tmp/det
     python -m generator.recipes.recognition prepare --languages multilingual --out /tmp/rec --num-train 300000
     python scripts/generate_grid.py --det /tmp/det --rec /tmp/rec -o docs/examples.jpg
 
-Two rows of detection pages (one layout and language each), then recognition crops in
-many scripts, each with its exact label.
+Two rows of detection pages (one layout and language each, plus a text-free hard
+negative), then printed and handwritten recognition crops in many scripts, each with
+its exact label.
 """
 
 import argparse
@@ -21,6 +22,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from generator.components.config import GenerationConfig
@@ -30,18 +32,21 @@ from generator.recipes.fonts import ManifestFontSelector
 from generator.recipes.languages import script_of
 from generator.recipes.recognition import CropWorker, _read_tsv
 
-# (language, layout, capture, caption) - two rows of four. ``capture`` picks how the page
-# reaches the camera or scanner, so the image shows the range: a colour scan, a grayscale
-# scan, a black-and-white copy and phone photos (bent sheet, lighting, colour cast).
+# (language, layout, density, capture, caption) - two rows of five. ``capture`` picks how the
+# page reaches the camera or scanner, so the image shows the range: colour, grayscale and
+# black-and-white scans and phone photos (bent sheet, fabric or wood under it, colour cast).
+# ``layout=None`` is a text-free hard negative: a crumpled blank sheet on a tablecloth.
 PAGES = [
-    ("en", "paragraph", "photo", "Report · English · phone photo"),
-    ("de", "receipt", "scan", "Receipt · German · scan"),
-    ("pl", "newspaper", "gray", "Newspaper · Polish · grayscale scan"),
-    ("ar", "id_card", "photo", "ID card · Arabic · phone photo"),
-    ("ru", "form", "bw", "Form · Russian · B&W copy"),
-    ("hi", "table", "scan", "Table · Hindi · scan"),
-    ("ja", "vertical", "photo", "Vertical · Japanese · phone photo"),
-    ("he", "paragraph", "gray", "Letter · Hebrew · grayscale scan"),
+    ("en", "paragraph", "low", "photo", "Report · English · phone photo"),
+    ("de", "receipt", "low", "photo", "Receipt · German · photo"),
+    ("ru", "newspaper", "high", "gray", "Dense newspaper · Russian · gray scan"),
+    ("ar", "id_card", "low", "photo", "ID card · Arabic · phone photo"),
+    ("de", "form", "low", "bw", "Form, by hand · German · B&W copy"),
+    ("hi", "table", "low", "scan", "Table · Hindi · scan"),
+    ("ja", "vertical", "low", "photo", "Vertical · Japanese · phone photo"),
+    ("he", "paragraph", "medium", "gray", "Letter · Hebrew · grayscale scan"),
+    ("el", "id_card", "low", "scan", "ID card, chip + MRZ · Greek · scan"),
+    ("en", None, "low", "photo", "No text (hard negative) · photo"),
 ]
 # (script group, language) for the crop grid.
 CROPS = [
@@ -50,6 +55,11 @@ CROPS = [
     ("DEVANAGARI", "hi"), ("BENGALI", "bn"), ("GURMUKHI", "pa"), ("GUJARATI", "gu"), ("TAMIL", "ta"),
     ("TELUGU", "te"), ("KANNADA", "kn"), ("MALAYALAM", "ml"), ("SINHALA", "si"), ("THAI", "th"), ("LAO", "lo"),
     ("KHMER", "km"), ("MYANMAR", "my"), ("GEORGIAN", "ka"), ("ARMENIAN", "hy"), ("ETHIOPIC", "am"),
+]  # fmt: skip
+# Handwritten crops (filled-in forms, notes): one row.
+HAND_CROPS = [
+    ("LATIN", "de"), ("LATIN", "vi"), ("CYRILLIC", "ru"), ("GREEK", "el"), ("ARABIC", "ar"), ("HEBREW", "he"),
+    ("THAI", "th"),
 ]  # fmt: skip
 WIDTH, MARGIN, GAP, RADIUS = 2400, 40, 22, 14
 PAGE_H = 440
@@ -68,16 +78,20 @@ def detection_pages(det_out: Path, bg_dir: str | None, seed: int) -> list[tuple[
     cfg.detection.partial_page_prob = 0.0  # show each layout in full
     SyntheticDatasetGenerator(cfg).resolve_backgrounds()
     pools, nums, _ = detection._load_meta(det_out / "meta")
-    worker = detection.PageWorker(cfg, str(det_out / "meta" / "fonts"), detection.MAX_LONG_EDGE, 1000)
+    worker = detection.PageWorker(cfg, str(det_out / "meta" / "fonts"), detection.MAX_LONG_EDGE)
     pages = []
     plain = cfg.detection.plain_background_prob
-    for i, (lang, layout, capture, caption) in enumerate(PAGES):
+    for i, (lang, layout, density, capture, caption) in enumerate(PAGES):
         if lang not in pools:
             continue
-        cfg.detection.layout = layout
+        worker.density = density
         cfg.capture.prob = 1.0 if capture == "photo" else 0.0
+        cfg.capture.textured_surface_prob = 1.0  # show the tablecloths and tables
         cfg.realism.grayscale_prob = 1.0 if capture == "gray" else 0.0
         cfg.realism.bitonal_prob = 1.0 if capture == "bw" else 0.0
+        cfg.detection.crease_prob = 1.0 if layout == "receipt" else 0.0
+        cfg.detection.picture_prob = 1.0 if layout == "paragraph" and capture == "photo" else 0.0
+        cfg.detection.handwriting_prob = 1.0 if layout == "form" else 0.35
         # A copier sheet is plain paper; on a textured background thresholding would
         # erase words, and the generator then (rightly) falls back to grayscale.
         cfg.detection.plain_background_prob = 1.0 if capture == "bw" else plain
@@ -85,6 +99,15 @@ def detection_pages(det_out: Path, bg_dir: str | None, seed: int) -> list[tuple[
             random.seed(seed + 31 * i + attempt)
             np.random.seed(seed + 31 * i + attempt)
             _, words, _ = next(detection.page_plan(1, seed + i + attempt, pools, nums, {lang: 1.0}))
+            if layout is None:
+                worker._apply_density()
+                worker.selector.language = lang
+                pages.append((
+                    worker.gen.generate_page(words, negative=True, negative_kind="creased_sheet")[0],
+                    caption,
+                ))
+                break
+            cfg.detection.layout = layout
             result = worker.page(lang, words)
             if result and capture == "bw" and len(np.unique(np.asarray(result[0].convert("L")))) > 2:
                 continue  # fell back to grayscale: the caption would be wrong
@@ -94,8 +117,8 @@ def detection_pages(det_out: Path, bg_dir: str | None, seed: int) -> list[tuple[
     return pages
 
 
-def recognition_crops(rec_out: Path, bg_dir: str | None, seed: int) -> list[tuple[Image.Image, str]]:
-    """One crop per entry of ``CROPS``, drawn from the prepared label pool."""
+def recognition_crops(rec_out: Path, bg_dir: str | None, seed: int) -> list[tuple[Image.Image, str, bool]]:
+    """One crop per entry of ``CROPS`` and ``HAND_CROPS``, drawn from the prepared label pool."""
     rows = _read_tsv(rec_out / "meta" / "train_labels.tsv")
     rng = random.Random(seed)
     pool: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -106,14 +129,20 @@ def recognition_crops(rec_out: Path, bg_dir: str | None, seed: int) -> list[tupl
     SyntheticDatasetGenerator(cfg).resolve_backgrounds()
     random.seed(seed)
     np.random.seed(seed)
-    worker = CropWorker(cfg, str(rec_out / "meta" / "fonts"))
-    tmp = rec_out / "preview" / "_grid_crop.png"
-    tmp.parent.mkdir(parents=True, exist_ok=True)
+    worker = CropWorker(cfg, str(rec_out / "meta" / "fonts"), handwriting_share=1.0)
     crops = []
     for group, lang in CROPS:
         for text in pool.get((group, lang), [])[:20]:
-            if worker.render((lang, text), str(tmp)) is not None:
-                crops.append((Image.open(tmp).convert("RGB"), text))
+            worker.selector.language = lang
+            if (img := worker.gen.generate_image(text)) is not None:
+                crops.append((img.convert("RGB"), text, False))
+                break
+    for group, lang in HAND_CROPS:
+        for text in pool.get((group, lang), [])[20:60]:
+            worker.selector.language = lang
+            hand = worker.selector.get_handwriting_font(text)
+            if hand and (img := worker.gen.generate_image(text, font_path=hand)) is not None:
+                crops.append((img.convert("RGB"), text, True))
                 break
     return crops
 
@@ -132,9 +161,10 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector) -> Image
     """Headings, two rows of pages and the crop grid on one sheet."""
     title = ImageFont.truetype(ui_font, 34)
     small = ImageFont.truetype(ui_font, 19)
+    ui_chars = {chr(c) for c in TTFont(ui_font).getBestCmap()}
     inner = WIDTH - 2 * MARGIN
     layout = []
-    for row in (pages[:4], pages[4:8]):
+    for row in (pages[:5], pages[5:10]):
         if not row:
             continue
         scaled = [
@@ -145,9 +175,11 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector) -> Image
         scaled = [(p.resize((int(p.width * fit), int(p.height * fit)), Image.Resampling.LANCZOS), c) for p, c in scaled]
         layout.append(scaled)
 
-    crop_rows = (len(crops) + COLS - 1) // COLS
+    printed = [c for c in crops if not c[2]]
+    written = [c for c in crops if c[2]]
+    crop_rows = (len(printed) + COLS - 1) // COLS + (len(written) + COLS - 1) // COLS
     height = MARGIN + 58 + sum(r[0][0].height + 46 + GAP for r in layout)
-    height += 70 + crop_rows * (CELL_H + GAP) + MARGIN
+    height += 70 + crop_rows * (CELL_H + GAP) + (40 if written else 0) + MARGIN
     sheet = Image.new("RGB", (WIDTH, height), BG)
 
     def heading(y: int, text: str, sub: str) -> None:
@@ -169,19 +201,27 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector) -> Image
         y += row[0][0].height + 46 + GAP
 
     y += 12
-    heading(y, "Text recognition", "word crops in 25 scripts, each with its exact label")
+    heading(y, "Text recognition", "printed and handwritten word crops in 25 scripts, each with its exact label")
     y += 58
     cell_w = (inner - GAP * (COLS - 1)) // COLS
-    for i, (crop, text) in enumerate(crops):
+    slots = [(i, c) for i, c in enumerate(printed)]
+    first_written = ((len(printed) + COLS - 1) // COLS) * COLS
+    slots += [(first_written + i, c) for i, c in enumerate(written)]
+    if written:
+        label_y = y + (first_written // COLS) * (CELL_H + GAP) - 4
+        ImageDraw.Draw(sheet).text((MARGIN, label_y), "handwritten", fill=MUTED, font=small)
+    for i, (crop, text, hand) in slots:
         cx = MARGIN + (i % COLS) * (cell_w + GAP)
-        cy = y + (i // COLS) * (CELL_H + GAP)
+        cy = y + (i // COLS) * (CELL_H + GAP) + (40 if hand else 0)
         _card(sheet, (cx, cy, cx + cell_w, cy + CELL_H))
         draw = ImageDraw.Draw(sheet)
         im = crop.resize((max(1, int(crop.width * CROP_H / crop.height)), CROP_H), Image.Resampling.LANCZOS)
         if im.width > cell_w - 20:
             im = im.resize((cell_w - 20, max(1, int(im.height * (cell_w - 20) / im.width))), Image.Resampling.LANCZOS)
         sheet.paste(im, (cx + (cell_w - im.width) // 2, cy + 12 + (CROP_H - im.height) // 2))
-        path = selector.get_font_for_text(text)
+        # The UI face where it covers the label (readable, same size everywhere), else a
+        # face of the label's script.
+        path = None if set(text) <= ui_chars else selector.get_font_for_text(text)
         font = ImageFont.truetype(path, 19) if path else small
         tw = draw.textlength(text, font=font)
         draw.text((cx + (cell_w - tw) / 2, cy + CROP_H + 24), text, fill=LABEL, font=font)

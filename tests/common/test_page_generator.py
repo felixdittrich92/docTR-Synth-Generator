@@ -1223,15 +1223,13 @@ def test_creased_sheet_negatives_are_photographed_on_a_surface(tiny_font_dir, mo
     cfg = _cfg(tiny_font_dir, capture_prob=0.0)
     cfg.explicit_options = frozenset()  # unpinned size: a capture may grow the frame
     pg = PageGenerator(cfg)
-    real_choices = random.choices
-
-    def only_creased(population, weights=None, k=1):
-        if "creased_sheet" in population:
-            return ["creased_sheet"]
-        return real_choices(population, weights=weights, k=k)
-
-    monkeypatch.setattr(pgm.random, "choices", only_creased)
-    page, polygons = pg.generate_page(WORDS, negative=True)
+    page, polygons = pg.generate_page(WORDS, negative=True, negative_kind="creased_sheet")
     assert polygons == [] and shots == [0.85]  # always a photo, mostly on cloth/wood/paper
     lum = np.asarray(page.convert("L"), dtype=np.float32)
     assert lum.std() > 8  # creases and the surface around the sheet, not a flat frame
+
+
+def test_unknown_negative_kind_is_rejected(tiny_font_dir):
+    pg = PageGenerator(_cfg(tiny_font_dir))
+    with pytest.raises(ValueError, match="negative kind"):
+        pg.generate_page(WORDS, negative=True, negative_kind="poster")

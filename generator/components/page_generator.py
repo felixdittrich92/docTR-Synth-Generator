@@ -91,14 +91,17 @@ class PageGenerator:
 
     # -- layout -----------------------------------------------------------
 
-    def generate_page(self, words: list[str], negative: bool = False) -> tuple[Image.Image, list[Polygon]]:
+    def generate_page(
+        self, words: list[str], negative: bool = False, negative_kind: str | None = None
+    ) -> tuple[Image.Image, list[Polygon]]:
         """Lay out ``words`` on a page and return the page image + word polygons.
 
         With ``negative=True`` the page carries no labelled text at all - blank or
         textured paper, an empty form, graphics, a photo, or only the show-through
         of a page printed on the reverse (``words`` feed that show-through). It goes
         through the same scan/camera pipeline and comes back with no polygons: a
-        hard negative that teaches a detector what is *not* text.
+        hard negative that teaches a detector what is *not* text. ``negative_kind``
+        pins its kind (see :attr:`NEGATIVE_KINDS`) instead of drawing one.
 
         The layout (paragraph, dense newspaper columns, a label/value form, an
         ID-card with fields or a fully vertical page) is chosen per
@@ -131,7 +134,7 @@ class PageGenerator:
         polygons: list[Polygon] = []
 
         if negative:
-            page, photographed = self._draw_negative(page, area, take_word if words else None, rtl)
+            page, photographed = self._draw_negative(page, area, take_word if words else None, rtl, negative_kind)
             return self._finish_page(page, [], width, height, negative=True, photographed=photographed)
 
         if random.random() < cfg.detection.bleed_through_prob:
@@ -561,7 +564,10 @@ class PageGenerator:
         """A text-free image for a page: a photo/texture crop, cloth, wood or a soft abstract."""
         kind = random.random()
         if kind < 0.45 and self.background_manager.bg_images:  # without images this would be blank
-            return self.background_manager.get_background_crop(size).convert("RGB")
+            crop = self.background_manager.get_background_crop(size).convert("RGB")
+            if np.asarray(crop.convert("L"), dtype=np.float32).std() > 20:
+                return crop
+            kind = random.uniform(0.45, 1.0)  # a near-flat paper crop reads as an empty box, not a photo
         if kind < 0.65:
             return fabric(size)
         if kind < 0.8:
@@ -677,16 +683,27 @@ class PageGenerator:
 
     # -- negative pages ---------------------------------------------------
 
-    def _draw_negative(self, page, area, take_word, rtl):
+    #: Kinds of text-free page and how often each is drawn.
+    NEGATIVE_KINDS = {
+        "blank": 0.06,
+        "empty_form": 0.15,
+        "graphics": 0.12,
+        "photo": 0.08,
+        "backside": 0.15,
+        "texture": 0.2,
+        "creased_sheet": 0.24,
+    }
+
+    def _draw_negative(self, page, area, take_word, rtl, kind=None):
         """Content of a page with no labelled text.
 
         Returns the (possibly replaced) page and whether it must be photographed:
         a creased blank sheet is a camera shot of paper lying on cloth or wood.
         """
-        kind = random.choices(
-            ["blank", "empty_form", "graphics", "photo", "backside", "texture", "creased_sheet"],
-            weights=[0.06, 0.15, 0.12, 0.08, 0.15, 0.2, 0.24],
-        )[0]
+        if kind is None:
+            kind = random.choices(list(self.NEGATIVE_KINDS), weights=list(self.NEGATIVE_KINDS.values()))[0]
+        elif kind not in self.NEGATIVE_KINDS:
+            raise ValueError(f"unknown negative kind {kind!r}; expected one of {sorted(self.NEGATIVE_KINDS)}")
         if kind == "photo" and not self.background_manager.bg_images:
             kind = "texture"  # without background images a "photo" would be a blank frame
         if kind == "texture":

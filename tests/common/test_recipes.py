@@ -314,3 +314,15 @@ def test_mrz_tokens_follow_the_machine_readable_alphabet():
     tokens = mrz_tokens(200, random.Random(0))
     assert all(len(t) == 30 and set(t) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<") for t in tokens)
     assert any("<<" in t for t in tokens)
+
+
+def test_legibility_is_measured_at_the_training_input_size():
+    import numpy as np
+
+    from generator.recipes.detection import legible_at_input_size
+
+    # 10 px words on a 2048 px page: 5 px at 1024 (too small for the dense floor of 6),
+    # 7.5 px at 1536 - legible for a model trained at that size.
+    boxes = np.array([[[0, 0], [60, 0], [60, 10], [0, 10]]] * 50, dtype=np.float64)
+    assert not legible_at_input_size(boxes, (2048, 2048), min_px=6.0, max_tiny=0.03)
+    assert legible_at_input_size(boxes, (2048, 2048), min_px=6.0, max_tiny=0.03, input_size=1536)

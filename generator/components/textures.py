@@ -17,7 +17,7 @@ import math
 import random
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 __all__ = ["fabric", "wood", "crease_shading", "apply_creases", "surface", "crumpled_sheet"]
 
@@ -41,7 +41,9 @@ def _palette() -> np.ndarray:
 
 def _weave(u: np.ndarray, v: np.ndarray, h: int, w: int) -> np.ndarray:
     """Thread structure in about [0.25, 0.75]: plain weave, twill/denim, knit or corduroy."""
-    period = random.uniform(2.5, 7.0)
+    # Thread spacing as it lands in a ~1600 px frame: fine shirting to chunky knit,
+    # so the weave stays visible after the frame is shrunk to a model's input.
+    period = random.uniform(2.5, 12.0)
     kind = random.random()
     if kind < 0.4:  # plain weave: threads alternate over/under
         out = 0.5 + 0.25 * np.sin(2 * math.pi * u / period) * np.sign(np.sin(2 * math.pi * v / period))
@@ -54,6 +56,21 @@ def _weave(u: np.ndarray, v: np.ndarray, h: int, w: int) -> np.ndarray:
         rib = random.uniform(5, 14)
         out = 0.5 + 0.25 * np.abs(np.sin(math.pi * u / rib)) ** 0.5 - 0.1
     return out + 0.12 * (_smooth_noise(h, w, period * 3) - 0.5)  # slubs: uneven yarn
+
+
+def _flecks(img: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Scattered contrasting nubs (tweed, boucle, flecked tablecloth, car-seat fabric).
+
+    Small isolated blobs are what a detector most easily mistakes for tiny text.
+    """
+    count = int(h * w * random.uniform(0.0008, 0.006))
+    mask = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(mask)
+    for x, y in zip(np.random.randint(0, w, count), np.random.randint(0, h, count)):
+        r = random.uniform(1.0, 3.5)
+        draw.ellipse((x - r, y - r * random.uniform(0.6, 1.4), x + r, y + r), fill=random.randint(150, 255))
+    m = np.asarray(mask.filter(ImageFilter.GaussianBlur(0.6)), dtype=np.float32)[..., None] / 255.0
+    return img * (1 - m) + _palette()[None, None, :] * m
 
 
 def fabric(size: tuple[int, int]) -> Image.Image:
@@ -83,6 +100,8 @@ def fabric(size: tuple[int, int]) -> Image.Image:
         p = random.uniform(18, 60)
         dots = (np.hypot((u % p) - p / 2, (v % p) - p / 2) < p * random.uniform(0.15, 0.3)).astype(np.float32)
         img = img * (1 - 0.6 * dots[..., None]) + _palette()[None, None, :] * 0.6 * dots[..., None]
+    if random.random() < 0.3:
+        img = _flecks(img, h, w)
     shade = 0.85 + 0.3 * _smooth_noise(h, w, max(w, h) / 3)  # the cloth sags
     if random.random() < 0.6:  # and is wrinkled: sharp folds where it was creased
         shade = shade * crease_shading(size, folds=random.randint(2, 7), crumple=random.uniform(0.0, 0.8))

@@ -135,8 +135,9 @@ python -m generator.recipes.detection render  --out multilingual_det
 codes such as `de,fr,ru`. `--num-train`, `--num-val` and `--min-char-count` set the size and the
 per-character floor. Recognition: `--handwriting-share` (default `0.05`) writes crops in one of ~40
 handwriting faces (Latin, Cyrillic, Greek, Arabic, Hebrew, Thai, Indic, CJK, Korean). Detection:
-`--density` (`mixed` by default: 50% letters, 30% reports, 20% broadsheet-dense pages with up to ~3000
-words) and `--negative-share` (default `0.05`, pages without text). Train with docTR as usual:
+`--density` (`mixed` by default: 55% letters, 30% reports, 15% broadsheet-dense pages with up to ~2500
+words), `--negative-share` (default `0.05`, pages without text) and `--input-size` (default `1024`, the
+docTR `--input_size` you train at: every word stays at least 5-6 px tall there). Train with docTR as usual:
 
 ```bash
 python references/recognition/train.py crnn_vgg16_bn --train_path european_rec/train --val_path european_rec/val ...
@@ -144,8 +145,8 @@ python references/detection/train.py db_resnet50 --train_path multilingual_det/t
 ```
 
 Pass `--rotation` for detection: photographed and skewed pages carry rotated polygons, and without it
-docTR turns them into loose straight boxes. For dense pages a larger `--input_size` (e.g. `1536`)
-keeps small newspaper text above a few pixels.
+docTR turns them into loose straight boxes. To learn really dense newspapers, render with
+`--input-size 1536` and train with `--input_size 1536`: the same legibility floor then admits finer print.
 
 Each `shard_XXXX/` folder under `train/` is picked up by docTR's recognition script. The model vocab
 is written to `meta/vocab.txt`: add it to docTR's `VOCABS` under a name and pass that name as `--vocab`.

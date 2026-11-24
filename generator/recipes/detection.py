@@ -90,17 +90,20 @@ PAGE_DENSITY = {
     "medium": ((12.0, 16.0), 0.05, (14, 20), 18, (5, 14), (2, 4)),
     "high": ((8.5, 12.5), 0.22, (9, 15), 48, (6, 22), (3, 6)),  # the generator's own defaults
 }
-# Per-preset limits: (max boxes, delivered long edge, min text px at 1024, max tiny share).
-# Dense pages - a broadsheet carries 2,000+ words - keep their real density: more boxes,
-# a larger delivered image (for training at --input_size 1536/2048) and the fine print
-# real newspapers have.
+# Per-preset limits: (max boxes, delivered long edge, min text px at the training input
+# size, max tiny share). Dense pages - a broadsheet carries 2,000+ words - keep many boxes
+# and a larger delivered image, but their words must stay learnable at --input-size: a
+# fine-tune on 4 px words (at 1024) learned that specks of fabric and grain are text and
+# lost a quarter of its precision on real receipt photos (CORD 41% -> 32%). Training at
+# docTR --input_size 1536/2048? Pass the same --input-size and the pages get denser.
 DENSITY_LIMITS = {
     "low": (800, 1600, 5.0, 0.03),
-    "medium": (1500, 1600, 5.0, 0.04),
-    "high": (3000, 2048, 4.0, 0.06),
+    "medium": (1500, 1600, 5.5, 0.03),
+    "high": (2500, 2048, 6.0, 0.03),
 }
-# --density mixed (the default) draws the preset per page.
-DENSITY_MIX = {"low": 0.5, "medium": 0.3, "high": 0.2}
+# --density mixed (the default) draws the preset per page. Real collections are mostly
+# letters, forms and reports; broadsheets are the minority.
+DENSITY_MIX = {"low": 0.55, "medium": 0.3, "high": 0.15}
 
 WORDS_PER_LANG = 30_000
 CANDIDATES_PER_PAGE = 600  # the page recycles these, so this bounds per-page vocabulary
@@ -309,11 +312,19 @@ def text_heights_at_input(
 
 
 def legible_at_input_size(
-    polygons: np.ndarray, size: tuple[int, int], min_px: float = MIN_TEXT_PX, max_tiny: float = MAX_TINY_SHARE
+    polygons: np.ndarray,
+    size: tuple[int, int],
+    min_px: float = MIN_TEXT_PX,
+    max_tiny: float = MAX_TINY_SHARE,
+    input_size: int = TRAIN_INPUT_SIZE,
 ) -> bool:
-    """Whether no more than ``max_tiny`` of the words fall below ``min_px`` at docTR's input size."""
-    heights = text_heights_at_input(polygons, size)
+    """Whether no more than ``max_tiny`` of the words fall below ``min_px`` at the training input size."""
+    heights = text_heights_at_input(polygons, size, input_size)
     return not len(heights) or float((heights < min_px).mean()) <= max_tiny
+
+
+def _input_size(args) -> int:
+    return getattr(args, "input_size", TRAIN_INPUT_SIZE)
 
 
 class PageWorker(Worker):
@@ -326,6 +337,7 @@ class PageWorker(Worker):
         max_long_edge: int | None = None,
         max_boxes: int | None = None,
         density: str = "low",
+        input_size: int = TRAIN_INPUT_SIZE,
     ):
         self.selector = ManifestFontSelector(
             font_dir, handwriting=cfg.resources.auto_download_fonts, cache_dir=cfg.resources.font_cache_dir
@@ -333,6 +345,7 @@ class PageWorker(Worker):
         self.gen = PageGenerator(cfg, font_selector=self.selector)
         self.fixed_long_edge, self.fixed_max_boxes = max_long_edge, max_boxes
         self.density = density
+        self.input_size = input_size  # the docTR --input_size the pages must stay legible at
         self.max_long_edge, self.max_boxes = max_long_edge or MAX_LONG_EDGE, max_boxes or MAX_BOXES_PER_PAGE
         self.min_px, self.max_tiny = MIN_TEXT_PX, MAX_TINY_SHARE
         self.dense = False
@@ -347,7 +360,7 @@ class PageWorker(Worker):
         self.dense = preset == "high"
         boxes, long_edge, self.min_px, self.max_tiny = DENSITY_LIMITS[preset]
         self.max_boxes = self.fixed_max_boxes or boxes
-        self.max_long_edge = self.fixed_long_edge or long_edge
+        self.max_long_edge = self.fixed_long_edge or max(long_edge, self.input_size)
         self.gen.config.media.delivery_long_edge_range = (DELIVERY_LONG_EDGE[0], float(self.max_long_edge))
 
     def page(self, lang: str, words: list[str], negative: bool = False) -> tuple[Image.Image, np.ndarray] | None:
@@ -368,7 +381,9 @@ class PageWorker(Worker):
             return page, np.zeros((0, 4, 2))
         for _ in range(PAGE_ATTEMPTS):
             result = self._page_once(lang, words)
-            if result is not None and legible_at_input_size(result[1], result[0].size, self.min_px, self.max_tiny):
+            if result is not None and legible_at_input_size(
+                result[1], result[0].size, self.min_px, self.max_tiny, self.input_size
+            ):
                 return result
         return None
 
@@ -529,7 +544,7 @@ def render(args) -> None:
     progress = Progress(sum(j[1] for j in jobs), unit="pages")
     if jobs:
         print(f"Rendering {progress.total:,} pages in {len(jobs)} part(s) with {args.workers} workers ...")
-        factory_args = (cfg, str(meta / "fonts"), None, None, args.density)
+        factory_args = (cfg, str(meta / "fonts"), None, None, args.density, _input_size(args))
         with make_pool(args.workers, PageWorker, factory_args) as pool:
             for split, n, start, seed, part in jobs:
                 items = [
@@ -561,7 +576,7 @@ def preview(args) -> Path:
     SyntheticDatasetGenerator(cfg).resolve_backgrounds()
     random.seed(args.seed)
     np.random.seed(args.seed)
-    worker = PageWorker(cfg, str(meta / "fonts"), None, None, args.density)
+    worker = PageWorker(cfg, str(meta / "fonts"), None, None, args.density, _input_size(args))
     wanted = args.preview_languages.split(",") if args.preview_languages else None
     pages = []
     for lang, words, _ in page_plan(args.samples * 8, args.seed, pools, nums, weights):
@@ -590,6 +605,12 @@ def main(argv: list[str] | None = None) -> None:
         choices=[*sorted(PAGE_DENSITY), "mixed"],
         default="mixed",
         help="typography preset; 'mixed' draws low/medium/high per page (50/30/20%%) - high is broadsheet-dense",
+    )
+    p.add_argument(
+        "--input-size",
+        type=int,
+        default=TRAIN_INPUT_SIZE,
+        help="the docTR --input_size you train at; every page stays legible at it (larger: denser pages allowed)",
     )
     p.add_argument(
         "--negative-share",

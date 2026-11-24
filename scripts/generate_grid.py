@@ -7,7 +7,7 @@
 """Render the README example image from two prepared recipe builds.
 
     python -m generator.recipes.detection prepare --languages en,de,ru,ar,hi,ja,he,el --out /tmp/det
-    python -m generator.recipes.recognition prepare --languages multilingual --out /tmp/rec --num-train 300000
+    python -m generator.recipes.recognition prepare --languages all --out /tmp/rec --num-train 300000
     python scripts/generate_grid.py --det /tmp/det --rec /tmp/rec -o docs/examples.jpg
 
 Two rows of detection pages (one layout and language each, plus a text-free hard
@@ -44,22 +44,22 @@ PAGES = [
     ("de", "form", "low", "bw", "Form, by hand · German · B&W copy"),
     ("hi", "table", "low", "scan", "Table · Hindi · scan"),
     ("ja", "vertical", "low", "photo", "Vertical · Japanese · phone photo"),
-    ("he", "paragraph", "medium", "gray", "Letter · Hebrew · grayscale scan"),
+    ("he", "paragraph", "medium", "design", "Magazine · Hebrew · generated design", 11),
     ("el", "id_card", "low", "scan", "ID card, chip + MRZ · Greek · scan"),
     ("en", None, "low", "photo", "No text (hard negative) · photo"),
 ]
 # (script group, language) for the crop grid.
 CROPS = [
-    ("LATIN", "de"), ("LATIN", "vi"), ("LATIN", "pl"), ("LATIN", "es"), ("LATIN", "tr"), ("CYRILLIC", "ru"),
-    ("CYRILLIC", "uk"), ("GREEK", "el"), ("ARABIC", "ar"), ("ARABIC", "fa"), ("ARABIC", "ur"), ("HEBREW", "he"),
+    ("LATIN", "de"), ("LATIN", "vi"), ("LATIN", "pl"), ("LATIN", "es"), ("CJK", "zh"), ("CYRILLIC", "ru"),
+    ("CYRILLIC", "uk"), ("GREEK", "el"), ("ARABIC", "ar"), ("ARABIC", "fa"), ("HANGUL", "ko"), ("HEBREW", "he"),
     ("DEVANAGARI", "hi"), ("BENGALI", "bn"), ("GURMUKHI", "pa"), ("GUJARATI", "gu"), ("TAMIL", "ta"),
     ("TELUGU", "te"), ("KANNADA", "kn"), ("MALAYALAM", "ml"), ("SINHALA", "si"), ("THAI", "th"), ("LAO", "lo"),
     ("KHMER", "km"), ("MYANMAR", "my"), ("GEORGIAN", "ka"), ("ARMENIAN", "hy"), ("ETHIOPIC", "am"),
 ]  # fmt: skip
 # Handwritten crops (filled-in forms, notes): one row.
 HAND_CROPS = [
-    ("LATIN", "de"), ("LATIN", "vi"), ("CYRILLIC", "ru"), ("GREEK", "el"), ("ARABIC", "ar"), ("HEBREW", "he"),
-    ("THAI", "th"),
+    ("LATIN", "de"), ("CYRILLIC", "ru"), ("GREEK", "el"), ("ARABIC", "ar"), ("THAI", "th"), ("CJK", "ja"),
+    ("HANGUL", "ko"),
 ]  # fmt: skip
 WIDTH, MARGIN, GAP, RADIUS = 2400, 40, 22, 14
 PAGE_H = 440
@@ -81,7 +81,9 @@ def detection_pages(det_out: Path, bg_dir: str | None, seed: int) -> list[tuple[
     worker = detection.PageWorker(cfg, str(det_out / "meta" / "fonts"), detection.MAX_LONG_EDGE)
     pages = []
     plain = cfg.detection.plain_background_prob
-    for i, (lang, layout, density, capture, caption) in enumerate(PAGES):
+    for i, (lang, layout, density, capture, caption, *pinned) in enumerate(PAGES):
+        # An entry may pin its own seed: the page then does not change when others do.
+        base_rand, base_plan = (pinned[0], pinned[0]) if pinned else (seed + 31 * i, seed + i)
         if lang not in pools:
             continue
         worker.density = density
@@ -94,11 +96,14 @@ def detection_pages(det_out: Path, bg_dir: str | None, seed: int) -> list[tuple[
         cfg.detection.handwriting_prob = 1.0 if layout == "form" else 0.35
         # A copier sheet is plain paper; on a textured background thresholding would
         # erase words, and the generator then (rightly) falls back to grayscale.
-        cfg.detection.plain_background_prob = 1.0 if capture == "bw" else plain
+        cfg.detection.plain_background_prob = 1.0 if capture == "bw" else 0.0 if capture == "design" else plain
+        # A magazine page on a generated design; everywhere else the default mix.
+        worker.gen.background_manager.procedural_prob = 1.0 if capture == "design" else 0.0
+        cfg.detection.picture_prob = 1.0 if capture == "design" else cfg.detection.picture_prob
         for attempt in range(8):
-            random.seed(seed + 31 * i + attempt)
-            np.random.seed(seed + 31 * i + attempt)
-            _, words, _ = next(detection.page_plan(1, seed + i + attempt, pools, nums, {lang: 1.0}))
+            random.seed(base_rand + attempt)
+            np.random.seed(base_rand + attempt)
+            _, words, _ = next(detection.page_plan(1, base_plan + attempt, pools, nums, {lang: 1.0}))
             if layout is None:
                 worker._apply_density()
                 worker.selector.language = lang
@@ -111,6 +116,8 @@ def detection_pages(det_out: Path, bg_dir: str | None, seed: int) -> list[tuple[
             result = worker.page(lang, words)
             if result and capture == "bw" and len(np.unique(np.asarray(result[0].convert("L")))) > 2:
                 continue  # fell back to grayscale: the caption would be wrong
+            if result and capture == "design" and result[0].width < 0.6 * result[0].height:
+                continue  # a strip, not a magazine spread
             if result:
                 pages.append((result[0], caption))
                 break
@@ -132,19 +139,51 @@ def recognition_crops(rec_out: Path, bg_dir: str | None, seed: int) -> list[tupl
     worker = CropWorker(cfg, str(rec_out / "meta" / "fonts"), handwriting_share=1.0)
     crops = []
     for group, lang in CROPS:
+        candidates = []
         for text in pool.get((group, lang), [])[:20]:
             worker.selector.language = lang
             if (img := worker.gen.generate_image(text)) is not None:
-                crops.append((img.convert("RGB"), text, False))
+                candidates.append((img.convert("RGB"), text, False))
+            if len(candidates) == 3:
                 break
+        if candidates:  # the training data keeps its hard cases; the showcase shows a clear one
+            crops.append(max(candidates, key=lambda c: _clarity(c[0])))
     for group, lang in HAND_CROPS:
+        candidates = []
         for text in pool.get((group, lang), [])[20:60]:
             worker.selector.language = lang
             hand = worker.selector.get_handwriting_font(text)
             if hand and (img := worker.gen.generate_image(text, font_path=hand)) is not None:
-                crops.append((img.convert("RGB"), text, True))
+                candidates.append((img.convert("RGB"), text, True))
+            if len(candidates) == 3:
                 break
+        if candidates:
+            crops.append(max(candidates, key=lambda c: _clarity(c[0])))
     return crops
+
+
+def _clarity(img: Image.Image) -> float:
+    """Contrast x sharpness at docTR's crop height: picks a readable example for the sheet."""
+    g = np.asarray(img.convert("L").resize((max(8, img.width * 32 // img.height), 32)), dtype=np.float32)
+    lap = g[1:-1, 1:-1] * 4 - g[:-2, 1:-1] - g[2:, 1:-1] - g[1:-1, :-2] - g[1:-1, 2:]
+    return float(np.percentile(g, 95) - np.percentile(g, 5)) * float(np.abs(lap).mean())
+
+
+_LABEL_FACES: dict[str, set[str]] = {}
+
+
+def _label_font(text: str, selector: ManifestFontSelector) -> str | None:
+    """A plain Noto face for a CJK/Hangul label (display faces make those unreadable), else the script's face."""
+    if _group(text) not in ("CJK", "HIRAGANA", "KATAKANA", "HANGUL"):
+        return selector.get_font_for_text(text)  # shaped (Arabic, Indic) faces of the script itself
+    for path in selector.paths:
+        if "Noto" not in Path(path).name or "Serif" in Path(path).name:
+            continue
+        if path not in _LABEL_FACES:
+            _LABEL_FACES[path] = {chr(c) for c in TTFont(path, lazy=True).getBestCmap()}
+        if set(text) <= _LABEL_FACES[path]:
+            return path
+    return selector.get_font_for_text(text)
 
 
 def _card(sheet: Image.Image, box: tuple[int, int, int, int]) -> None:
@@ -161,6 +200,15 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector) -> Image
     """Headings, two rows of pages and the crop grid on one sheet."""
     title = ImageFont.truetype(ui_font, 34)
     small = ImageFont.truetype(ui_font, 19)
+
+    def _fit(text: str, width: int) -> ImageFont.FreeTypeFont:
+        """The caption face, shrunk until ``text`` fits under its page."""
+        for size in range(19, 11, -1):
+            face = ImageFont.truetype(ui_font, size)
+            if face.getlength(text) <= width - 4:
+                return face
+        return face
+
     ui_chars = {chr(c) for c in TTFont(ui_font).getBestCmap()}
     inner = WIDTH - 2 * MARGIN
     layout = []
@@ -196,12 +244,17 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector) -> Image
         for page, caption in row:
             _card(sheet, (x - 10, y - 10, x + page.width + 10, y + page.height + 38))
             sheet.paste(page, (x, y))
-            ImageDraw.Draw(sheet).text((x + 2, y + page.height + 8), caption, fill=MUTED, font=small)
+            ImageDraw.Draw(sheet).text(
+                (x + 2, y + page.height + 8), caption, fill=MUTED, font=_fit(caption, page.width)
+            )
             x += page.width + 2 * GAP
         y += row[0][0].height + 46 + GAP
 
     y += 12
-    heading(y, "Text recognition", "printed and handwritten word crops in 25 scripts, each with its exact label")
+    scripts = len({_group(text) for _, text, _ in crops} - {"NUMBERS"})
+    heading(
+        y, "Text recognition", f"printed and handwritten word crops in {scripts} scripts, each with its exact label"
+    )
     y += 58
     cell_w = (inner - GAP * (COLS - 1)) // COLS
     slots = [(i, c) for i, c in enumerate(printed)]
@@ -221,7 +274,7 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector) -> Image
         sheet.paste(im, (cx + (cell_w - im.width) // 2, cy + 12 + (CROP_H - im.height) // 2))
         # The UI face where it covers the label (readable, same size everywhere), else a
         # face of the label's script.
-        path = None if set(text) <= ui_chars else selector.get_font_for_text(text)
+        path = None if set(text) <= ui_chars else _label_font(text, selector)
         font = ImageFont.truetype(path, 19) if path else small
         tw = draw.textlength(text, font=font)
         draw.text((cx + (cell_w - tw) / 2, cy + CROP_H + 24), text, fill=LABEL, font=font)

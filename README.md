@@ -200,7 +200,7 @@ make style     # format and auto-fix
 ```
 
 To regenerate the image at the top, prepare one detection and one recognition build and run
-`python scripts/generate_grid.py --det <det build> --rec <rec build> -o docs/examples.jpg` (see the script for the languages it expects).
+`python scripts/generate_grid.py --det <det build> --rec <rec build> -o docs/examples.jpg` (both built with `--languages all`).
 
 ## Citation
 

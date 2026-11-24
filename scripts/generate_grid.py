@@ -30,16 +30,18 @@ from generator.recipes.fonts import ManifestFontSelector
 from generator.recipes.languages import script_of
 from generator.recipes.recognition import CropWorker, _read_tsv
 
-# (language, layout, caption) - two rows of four.
+# (language, layout, capture, caption) - two rows of four. ``capture`` picks how the page
+# reaches the camera or scanner, so the image shows the range: a colour scan, a grayscale
+# scan, a black-and-white copy and phone photos (bent sheet, lighting, colour cast).
 PAGES = [
-    ("en", "paragraph", "Report · English"),
-    ("de", "receipt", "Receipt · German"),
-    ("pl", "form", "Form with handwriting · Polish"),
-    ("ar", "id_card", "ID card · Arabic"),
-    ("ru", "newspaper", "Newspaper · Russian"),
-    ("hi", "table", "Table · Hindi"),
-    ("ja", "vertical", "Vertical · Japanese"),
-    ("he", "paragraph", "Letter · Hebrew"),
+    ("en", "paragraph", "photo", "Report · English · phone photo"),
+    ("de", "receipt", "scan", "Receipt · German · scan"),
+    ("pl", "newspaper", "gray", "Newspaper · Polish · grayscale scan"),
+    ("ar", "id_card", "photo", "ID card · Arabic · phone photo"),
+    ("ru", "form", "bw", "Form · Russian · B&W copy"),
+    ("hi", "table", "scan", "Table · Hindi · scan"),
+    ("ja", "vertical", "photo", "Vertical · Japanese · phone photo"),
+    ("he", "paragraph", "gray", "Letter · Hebrew · grayscale scan"),
 ]
 # (script group, language) for the crop grid.
 CROPS = [
@@ -68,15 +70,24 @@ def detection_pages(det_out: Path, bg_dir: str | None, seed: int) -> list[tuple[
     pools, nums, _ = detection._load_meta(det_out / "meta")
     worker = detection.PageWorker(cfg, str(det_out / "meta" / "fonts"), detection.MAX_LONG_EDGE, 1000)
     pages = []
-    for i, (lang, layout, caption) in enumerate(PAGES):
+    plain = cfg.detection.plain_background_prob
+    for i, (lang, layout, capture, caption) in enumerate(PAGES):
         if lang not in pools:
             continue
         cfg.detection.layout = layout
-        for attempt in range(4):
+        cfg.capture.prob = 1.0 if capture == "photo" else 0.0
+        cfg.realism.grayscale_prob = 1.0 if capture == "gray" else 0.0
+        cfg.realism.bitonal_prob = 1.0 if capture == "bw" else 0.0
+        # A copier sheet is plain paper; on a textured background thresholding would
+        # erase words, and the generator then (rightly) falls back to grayscale.
+        cfg.detection.plain_background_prob = 1.0 if capture == "bw" else plain
+        for attempt in range(8):
             random.seed(seed + 31 * i + attempt)
             np.random.seed(seed + 31 * i + attempt)
             _, words = next(detection.page_plan(1, seed + i + attempt, pools, nums, {lang: 1.0}))
             result = worker.page(lang, words)
+            if result and capture == "bw" and len(np.unique(np.asarray(result[0].convert("L")))) > 2:
+                continue  # fell back to grayscale: the caption would be wrong
             if result:
                 pages.append((result[0], caption))
                 break

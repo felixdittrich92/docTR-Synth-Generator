@@ -78,6 +78,10 @@ MIN_TEXT_PX = 5.0
 MAX_TINY_SHARE = 0.03
 MAX_BOXES_PER_PAGE = 800
 PAGE_ATTEMPTS = 4
+# Pages with no labelled text at all - blank paper, empty forms, charts, photos, the
+# show-through of a page printed on the back. Hard negatives: they teach a detector
+# what is *not* text, the main source of false positives on real documents.
+NEGATIVE_SHARE = 0.05
 # Typography presets: (body points, fine-print prob, newspaper px, max blocks, table rows,
 # newspaper columns). docTR's DetectionDataset holds every box in RAM, so this is the main
 # lever on labels.json size as well as on legibility after the resize to 1024 px.
@@ -307,8 +311,21 @@ class PageWorker(Worker):
         self.max_long_edge, self.max_boxes = max_long_edge, max_boxes
         self.save = ("JPEG", {"quality": cfg.core.output_jpeg_quality}) if cfg.core.output_jpeg else ("PNG", {})
 
-    def page(self, lang: str, words: list[str]) -> tuple[Image.Image, np.ndarray] | None:
-        """Render a page whose text stays legible at docTR's input size (``None`` if none did)."""
+    def page(self, lang: str, words: list[str], negative: bool = False) -> tuple[Image.Image, np.ndarray] | None:
+        """Render a page whose text stays legible at docTR's input size (``None`` if none did).
+
+        ``negative`` renders a page without any labelled text (see
+        :meth:`PageGenerator.generate_page`); ``words`` then only feed its show-through.
+        """
+        if negative:
+            self.selector.language = lang
+            page, _ = self.gen.generate_page(words, negative=True)
+            if self.max_long_edge and max(page.size) > self.max_long_edge:
+                scale = self.max_long_edge / max(page.size)
+                page = page.resize(
+                    (max(1, round(page.width * scale)), max(1, round(page.height * scale))), Image.Resampling.LANCZOS
+                )
+            return page, np.zeros((0, 4, 2))
         for _ in range(PAGE_ATTEMPTS):
             result = self._page_once(lang, words)
             if result is not None and legible_at_input_size(result[1], result[0].size):
@@ -337,9 +354,10 @@ class PageWorker(Worker):
         return page, arr
 
     def render(self, payload, path):
-        """Render ``(lang, words)`` to ``path``; the record is the docTR label entry."""
-        lang, words = payload
-        result = self.page(lang, words)
+        """Render ``(lang, words, negative)`` to ``path``; the record is the docTR label entry."""
+        lang, words, *rest = payload
+        negative = bool(rest and rest[0])
+        result = self.page(lang, words, negative)
         if result is None:
             return None
         page, arr = result
@@ -349,7 +367,8 @@ class PageWorker(Worker):
         # Integer pixels: docTR normalises by image size and resizes to 1024, so sub-pixel
         # corners are noise - and they cost ~35% of the file.
         polygons = np.rint(arr).astype(np.int32).tolist()
-        return {"lang": lang, "img_dimensions": [page.height, page.width], "img_hash": digest, "polygons": polygons}
+        record = {"img_dimensions": [page.height, page.width], "img_hash": digest, "polygons": polygons}
+        return {"lang": "none (no text)" if negative else lang, **record}
 
 
 def _load_meta(meta: Path):
@@ -362,9 +381,15 @@ def _load_meta(meta: Path):
     return pools, nums, weights
 
 
-def page_plan(n: int, seed: int, pools, nums, weights):
-    """Deterministic language + candidate list per page (regenerated identically on resume)."""
+def page_plan(n: int, seed: int, pools, nums, weights, negative_share: float = 0.0):
+    """Deterministic language, candidate list and negative flag per page (identical on resume).
+
+    A negative page carries no labelled text; its words only feed the show-through.
+    The flag has its own random stream, so the text pages of a plan do not change
+    with ``negative_share``.
+    """
     rng = random.Random(seed)
+    neg_rng = random.Random(seed + 104_729)
     langs = list(weights)
     en = pools.get("en", [])
     for lang in rng.choices(langs, weights=[weights[k] for k in langs], k=n):
@@ -375,7 +400,7 @@ def page_plan(n: int, seed: int, pools, nums, weights):
         words = [rng.choice(pool) for _ in range(CANDIDATES_PER_PAGE - n_num - n_mix)]
         words += [rng.choice(num) for _ in range(n_num)] + [rng.choice(en) for _ in range(n_mix)]
         rng.shuffle(words)  # the RTL decision looks at the first candidates
-        yield lang, words
+        yield lang, words, neg_rng.random() < negative_share
 
 
 def _config(args) -> GenerationConfig:
@@ -464,7 +489,9 @@ def render(args) -> None:
             for split, n, start, seed, part in jobs:
                 items = [
                     (f"{start + i:07d}.{ext}", payload)
-                    for i, payload in enumerate(page_plan(n, seed, pools, nums, weights))
+                    for i, payload in enumerate(
+                        page_plan(n, seed, pools, nums, weights, getattr(args, "negative_share", NEGATIVE_SHARE))
+                    )
                 ]
                 records = render_part(pool, items, part, CHUNK, progress, f"{split}/{part.name}")
                 tmp = part / "labels.json.tmp"
@@ -492,7 +519,7 @@ def preview(args) -> Path:
     worker = PageWorker(cfg, str(meta / "fonts"), MAX_LONG_EDGE, MAX_BOXES_PER_PAGE)
     wanted = args.preview_languages.split(",") if args.preview_languages else None
     pages = []
-    for lang, words in page_plan(args.samples * 8, args.seed, pools, nums, weights):
+    for lang, words, _ in page_plan(args.samples * 8, args.seed, pools, nums, weights):
         if wanted and lang not in wanted:
             continue
         result = worker.page(lang, words)
@@ -514,6 +541,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--part-size", type=int, default=PART_SIZE)
     p.add_argument("--workers", type=int, default=os.cpu_count() or 4)
     p.add_argument("--density", choices=sorted(PAGE_DENSITY), default="low", help="typography preset (words per page)")
+    p.add_argument(
+        "--negative-share",
+        type=float,
+        default=NEGATIVE_SHARE,
+        help="share of pages without any text (blank, empty forms, graphics, photos, show-through only)",
+    )
     p.add_argument("--font-src", default="fonts_v1", help="unzipped fonts_v1 release (downloaded if missing)")
     p.add_argument("--cache", default=".recipe_cache", help="corpora, extra fonts and the font scan")
     p.add_argument("--bg-dir", default=None, help="background images (default: the curated download)")

@@ -369,9 +369,9 @@ class DetectionConfig:
     page_font_coherence: float = 0.9
     heading_font_prob: float = 0.5
     ink_deviation_prob: float = 0.12
-    bleed_through_prob: float = 0.15
-    bleed_through_alpha_range: tuple[float, float] = (0.04, 0.13)
-    bleed_through_blur_range: tuple[float, float] = (0.8, 2.2)
+    bleed_through_prob: float = 0.25
+    bleed_through_alpha_range: tuple[float, float] = (0.07, 0.22)
+    bleed_through_blur_range: tuple[float, float] = (0.5, 1.6)
     body_point_range: tuple[float, float] = (8.5, 12.5)
     heading_point_scale: tuple[float, float] = (1.35, 2.4)
     fine_print_prob: float = 0.22

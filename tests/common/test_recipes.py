@@ -276,15 +276,33 @@ def test_detection_recipe_end_to_end(tmp_path, temp_image_dir):
     args = Namespace(
         out=str(tmp_path / "det"), languages="en", num_train=3, num_val=1, part_size=2, workers=1, density="low",
         font_src=str(fonts), cache=str(tmp_path / "cache"), bg_dir=temp_image_dir, offline=True, png=False,
+        negative_share=0.4,
     )  # fmt: skip
     detection.prepare(args)
     detection.render(args)
+    negatives = 0
     for split, n in (("train", 3), ("val", 1)):
         labels = json.loads((tmp_path / "det" / split / "labels.json").read_text(encoding="utf-8"))
         assert len(labels) == n
+        counts = json.loads((tmp_path / "det" / split / "languages.json").read_text(encoding="utf-8"))
+        negatives += counts.get("none (no text)", 0)
         for name, entry in labels.items():
             image = Image.open(tmp_path / "det" / split / "images" / name)
             assert [image.height, image.width] == entry["img_dimensions"]
-            assert entry["polygons"] and all(
-                0 <= x <= image.width and 0 <= y <= image.height for poly in entry["polygons"] for x, y in poly
-            )
+            assert all(0 <= x <= image.width and 0 <= y <= image.height for poly in entry["polygons"] for x, y in poly)
+    empty = sum(
+        not e["polygons"]
+        for split in ("train", "val")
+        for e in json.loads((tmp_path / "det" / split / "labels.json").read_text(encoding="utf-8")).values()
+    )
+    assert empty == negatives  # a page without boxes is exactly a planned negative
+
+
+def test_page_plan_negatives_do_not_change_text_pages():
+    from generator.recipes.detection import page_plan
+
+    pools, nums, weights = {"en": ["a", "b", "c"]}, {"en": ["1"]}, {"en": 1.0}
+    plain = list(page_plan(50, 3, pools, nums, weights))
+    mixed = list(page_plan(50, 3, pools, nums, weights, negative_share=0.3))
+    assert [p[:2] for p in plain] == [m[:2] for m in mixed]
+    assert not any(p[2] for p in plain) and 5 <= sum(m[2] for m in mixed) <= 25

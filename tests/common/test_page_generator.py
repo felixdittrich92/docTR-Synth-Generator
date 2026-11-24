@@ -1115,3 +1115,26 @@ def test_punch_holes_sit_in_the_margin_without_hiding_labels(tiny_font_dir):
     column = arr[:, : int(page.width * 0.06)]
     assert (column < 80).any() or (column > 220).any()  # a hole was drawn in the margin
     assert polygons
+
+
+def test_negative_pages_carry_no_labels_but_do_carry_content(tiny_font_dir):
+    for seed in range(8):
+        random.seed(seed)
+        np.random.seed(seed)
+        pg = PageGenerator(_cfg(tiny_font_dir))
+        page, polygons = pg.generate_page(WORDS, negative=True)
+        assert polygons == []
+        assert page.mode == "RGB" and page.width > 0
+
+
+def test_show_through_is_light_grey_and_unlabelled(tiny_font_dir):
+    random.seed(0)
+    pg = PageGenerator(_cfg(tiny_font_dir))
+    page = Image.new("RGBA", (400, 520), (255, 255, 255, 255))
+    labels = []
+    pg._add_bleed_through(page, (20, 20, 380, 500), pg._word_supplier(WORDS), False)
+    lum = np.asarray(page.convert("L"), dtype=np.float32)
+    shown = lum[lum < 250]
+    assert shown.size > 500  # visible
+    assert shown.min() > 140  # light grey, never dark like real print
+    assert labels == []  # drawn into a scratch layer: nothing reaches the ground truth

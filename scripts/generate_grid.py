@@ -84,7 +84,7 @@ def detection_pages(det_out: Path, bg_dir: str | None, seed: int) -> list[tuple[
         for attempt in range(8):
             random.seed(seed + 31 * i + attempt)
             np.random.seed(seed + 31 * i + attempt)
-            _, words = next(detection.page_plan(1, seed + i + attempt, pools, nums, {lang: 1.0}))
+            _, words, _ = next(detection.page_plan(1, seed + i + attempt, pools, nums, {lang: 1.0}))
             result = worker.page(lang, words)
             if result and capture == "bw" and len(np.unique(np.asarray(result[0].convert("L")))) > 2:
                 continue  # fell back to grayscale: the caption would be wrong

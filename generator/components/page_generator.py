@@ -89,8 +89,14 @@ class PageGenerator:
 
     # -- layout -----------------------------------------------------------
 
-    def generate_page(self, words: list[str]) -> tuple[Image.Image, list[Polygon]]:
+    def generate_page(self, words: list[str], negative: bool = False) -> tuple[Image.Image, list[Polygon]]:
         """Lay out ``words`` on a page and return the page image + word polygons.
+
+        With ``negative=True`` the page carries no labelled text at all - blank or
+        textured paper, an empty form, graphics, a photo, or only the show-through
+        of a page printed on the reverse (``words`` feed that show-through). It goes
+        through the same scan/camera pipeline and comes back with no polygons: a
+        hard negative that teaches a detector what is *not* text.
 
         The layout (paragraph, dense newspaper columns, a label/value form, an
         ID-card with fields or a fully vertical page) is chosen per
@@ -112,15 +118,19 @@ class PageGenerator:
             page = self.background_manager.get_page_background((width, height)).convert("RGBA")
             page = self._calm_background(page)
 
-        if not words:
+        if not words and not negative:
             return page.convert("RGB"), []
 
-        take_word = self._word_supplier(words)
+        take_word = self._word_supplier(words or ["-"])
         rtl = self._is_rtl(words)
         self._rtl_page = rtl
         margin = max(4, int(min(width, height) * cfg.detection.margin_ratio))
         area = (margin, margin, width - margin, height - margin)
         polygons: list[Polygon] = []
+
+        if negative:
+            page = self._draw_negative(page, area, take_word if words else None, rtl)
+            return self._finish_page(page, [], width, height, negative=True)
 
         if random.random() < cfg.detection.bleed_through_prob:
             self._add_bleed_through(page, area, take_word, rtl)
@@ -158,20 +168,28 @@ class PageGenerator:
         if layout not in ("id_card", "receipt") and random.random() < cfg.detection.furniture_prob:
             self._add_furniture(page, (margin, margin, width - margin, height - margin), take_word, rtl, polygons)
 
+        return self._finish_page(page, polygons, width, height)
+
+    def _finish_page(self, page, polygons: list[Polygon], width: int, height: int, negative: bool = False):
+        """Scan or photograph the finished sheet and deliver it (shared by text and negative pages)."""
+        cfg = self.config
         page = page.convert("RGB")
         # A word running off the edge is legitimate, but its *box* must stop at
         # the page; anything fully outside is dropped.
         polygons = self._clip_polygons(polygons, width, height)
+        content = bool(polygons) or negative
+        if negative or self._min_text_px == float("inf"):
+            self._min_text_px = 24.0  # nominal: nothing on the page constrains the budget
 
         # Pinning the page size pins the *output* size: capture composites the
         # sheet into a larger frame and the delivery resample resizes it, so
         # both are skipped rather than silently returning other dimensions.
         fixed_size = cfg.pins_page_size()
-        if polygons and not fixed_size and should_capture(cfg):
+        if content and not fixed_size and should_capture(cfg):
             # A photographed capture already carries rotation in its homography,
             # so the flat page rotation is skipped rather than applied twice.
             page, polygons = apply_capture(cfg, page, polygons, DegradationBudget.for_text_height(self._min_text_px))
-        elif polygons and not fixed_size and random.random() < cfg.detection.rotation_prob:
+        elif content and not fixed_size and random.random() < cfg.detection.rotation_prob:
             # ``expand=True`` grows the canvas, so this is skipped too when the
             # caller pinned the output size.
             angle = random.uniform(*cfg.detection.rotation_range)
@@ -179,7 +197,7 @@ class PageGenerator:
 
         delivered = self._min_text_px
         softened = False
-        if self._media is not None and polygons and not fixed_size:
+        if self._media is not None and content and not fixed_size:
             page, polygons, scale = apply_delivery_resample(cfg, page, polygons, self._media, self._min_text_px)
             delivered *= scale
             softened = scale < 0.95
@@ -452,10 +470,117 @@ class PageGenerator:
         self._fill_box(layer, area, take_word, ignored, font_size, style, 0, rtl)
 
         layer = layer.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        # The reverse side has its own margins: its text never lines up with the front.
+        dx = int(page.width * random.uniform(-0.03, 0.03))
+        dy = int(page.height * random.uniform(-0.02, 0.02))
+        layer = layer.transform(layer.size, Image.Transform.AFFINE, (1, 0, -dx, 0, 1, -dy))
         layer = layer.filter(ImageFilter.GaussianBlur(random.uniform(*cfg.bleed_through_blur_range)))
         alpha = np.asarray(layer.getchannel("A"), dtype=np.float32) * random.uniform(*cfg.bleed_through_alpha_range)
         layer.putalpha(Image.fromarray(alpha.astype(np.uint8), mode="L"))
         page.alpha_composite(layer)
+
+    # -- negative pages ---------------------------------------------------
+
+    def _draw_negative(self, page, area, take_word, rtl):
+        """Content of a page with no labelled text; returns the (possibly replaced) page."""
+        kind = random.choices(
+            ["blank", "empty_form", "graphics", "photo", "backside"], weights=[0.15, 0.3, 0.2, 0.15, 0.2]
+        )[0]
+        if kind == "photo":
+            # A photograph or texture as the whole frame - and no text in it.
+            page = self.background_manager.get_page_background(page.size).convert("RGBA")
+        elif kind == "empty_form":
+            self._draw_empty_form(page, area)
+        elif kind == "graphics":
+            self._draw_graphics(page, area)
+        if take_word is not None and (kind == "backside" or random.random() < 0.3):
+            self._add_bleed_through(page, area, take_word, rtl)
+        return page
+
+    def _line_ink(self) -> tuple[int, int, int, int]:
+        tone = random.randint(20, 110)
+        if random.random() < 0.2:
+            return (*random.choice([(38, 62, 120), (28, 90, 70), (120, 40, 48)]), 255)
+        return (tone, tone, tone + random.randint(0, 12), 255)
+
+    def _draw_empty_form(self, page, area) -> None:
+        """Rules, boxes, checkboxes and grids of a form nobody has filled in yet."""
+        x0, y0, x1, y1 = area
+        draw = ImageDraw.Draw(page)
+        ink = self._line_ink()
+        unit = max(14, int((y1 - y0) / random.uniform(22, 40)))
+        width = max(1, unit // 14)
+        y = y0 + unit
+        while y < y1 - unit:
+            kind = random.random()
+            if kind < 0.35:  # label space + underline
+                start = x0 + int((x1 - x0) * random.uniform(0.15, 0.4))
+                draw.line((start, y + unit, x1 - random.randint(0, unit * 3), y + unit), fill=ink, width=width)
+                y += int(unit * 1.8)
+            elif kind < 0.55:  # boxed field
+                start = x0 + int((x1 - x0) * random.uniform(0.1, 0.35))
+                draw.rectangle((start, y, x1, y + unit), outline=ink, width=width)
+                y += int(unit * 1.8)
+            elif kind < 0.7:  # a row of checkboxes
+                for _ in range(random.randint(2, 5)):
+                    cx = random.randint(x0, max(x0, x1 - unit))
+                    draw.rectangle((cx, y, cx + int(unit * 0.7), y + int(unit * 0.7)), outline=ink, width=width)
+                y += int(unit * 1.6)
+            elif kind < 0.9:  # an empty table
+                rows, cols = random.randint(2, 6), random.randint(2, 6)
+                h = min(y1 - y, rows * unit * 1.4)
+                xs = sorted({x0, x1, *(random.randint(x0 + unit, x1 - unit) for _ in range(cols - 1))})
+                for c in xs:
+                    draw.line((c, y, c, y + h), fill=ink, width=width)
+                for r in range(rows + 1):
+                    draw.line((x0, y + r * h / rows, x1, y + r * h / rows), fill=ink, width=width)
+                y += int(h + unit)
+            else:  # a shaded section bar
+                tone = random.randint(205, 235)
+                draw.rectangle((x0, y, x1, y + int(unit * 0.9)), fill=(tone, tone, tone, 255))
+                y += int(unit * 1.6)
+        if random.random() < 0.4:
+            self._draw_signature(draw, area)
+
+    def _draw_graphics(self, page, area) -> None:
+        """Charts without labels, shapes, rules, barcodes and logos."""
+        x0, y0, x1, y1 = area
+        draw = ImageDraw.Draw(page)
+        for _ in range(random.randint(1, 4)):
+            w = int((x1 - x0) * random.uniform(0.25, 0.9))
+            h = int((y1 - y0) * random.uniform(0.12, 0.35))
+            bx = random.randint(x0, max(x0, x1 - w))
+            by = random.randint(y0, max(y0, y1 - h))
+            ink = self._line_ink()
+            kind = random.random()
+            if kind < 0.35:  # bar chart: axes and bars, no labels
+                draw.line((bx, by, bx, by + h, bx + w, by + h), fill=ink, width=2)
+                n = random.randint(3, 12)
+                step = w / (n + 1)
+                fill = random.choice([(42, 120, 214), (235, 104, 52), (27, 175, 122), (90, 90, 100)])
+                for i in range(n):
+                    bh = int(h * random.uniform(0.1, 0.95))
+                    left = bx + step * (i + 0.5)
+                    draw.rectangle((left, by + h - bh, left + step * 0.6, by + h - 1), fill=(*fill, 255))
+            elif kind < 0.55:  # line chart
+                draw.line((bx, by, bx, by + h, bx + w, by + h), fill=ink, width=2)
+                pts = [(bx + w * i / 12, by + h * random.uniform(0.1, 0.9)) for i in range(13)]
+                draw.line(pts, fill=(42, 120, 214, 255), width=3)
+            elif kind < 0.75:  # shapes
+                for _ in range(random.randint(2, 6)):
+                    r = random.randint(8, max(9, h // 3))
+                    cx, cy = random.randint(bx, bx + w), random.randint(by, by + h)
+                    colour = (*random.choice([(42, 120, 214), (235, 104, 52), (27, 175, 122), (237, 161, 0)]), 255)
+                    if random.random() < 0.5:
+                        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=colour)
+                    else:
+                        draw.rectangle((cx - r, cy - r, cx + r, cy + r), outline=colour, width=3)
+            else:  # rules and frames
+                for k in range(random.randint(2, 8)):
+                    yy = by + k * h / 8
+                    draw.line((bx, yy, bx + w, yy), fill=ink, width=random.randint(1, 3))
+        if random.random() < 0.6:
+            self._draw_non_text_mark(page, area, draw, [])
 
     # -- page furniture ---------------------------------------------------
 

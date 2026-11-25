@@ -1,6 +1,7 @@
 import json
 import random
 from argparse import Namespace
+from collections import Counter
 
 import numpy as np
 import pytest
@@ -223,3 +224,70 @@ def test_copied_letters_lose_their_languages_in_every_script(tmp_path):
     probes = {"LATIN": ("Hamburgefonstiv", ["en"]), "HEBREW": (hebrew[:8], ["he"])}
     drop = _borrowed(families, tmp_path, probes)
     assert drop == {"Base Sans Hebrew": {"en"}}  # Base Sans keeps Latin; both Hebrew designs differ
+
+
+def test_scaled_copies_lose_their_languages(tmp_path):
+    from generator.recipes.font_style import _borrowed
+
+    latin = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ "
+    hebrew = "".join(chr(c) for c in range(0x05D0, 0x05EB))
+    build_font(str(tmp_path / "base.ttf"), latin, family="Base Sans")
+    # The Latin of Base Sans drawn 10% larger: a copy (Noto Sans JP draws Source Sans larger)
+    build_font(str(tmp_path / "big.ttf"), latin + hebrew, family="Base Sans Hebrew", scale=1.1)
+    # Another design, also drawn larger: not a copy
+    build_font(str(tmp_path / "own.ttf"), latin + hebrew, family="Own", glyph=(200, 440), scale=1.1)
+    files = {"base.ttf": latin, "big.ttf": latin + hebrew, "own.ttf": latin + hebrew}
+    manifest = {"fonts": {n: {"chars": c} for n, c in files.items()}}
+    (tmp_path / "fonts.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def fam(file, langs):
+        return {"languages": set(langs), "variants": {file: {"file": file, "italic": False, "weight": 400,
+                                                             "weight_range": None}}}  # fmt: skip
+
+    families = {
+        "Base Sans": fam("base.ttf", ["en"]),
+        "Base Sans Hebrew": fam("big.ttf", ["en", "he"]),
+        "Own": fam("own.ttf", ["en", "he"]),
+    }
+    drop = _borrowed(families, tmp_path, {"LATIN": ("Hamburgefonstiv", ["en"])})
+    assert drop == {"Base Sans Hebrew": {"en"}}
+
+
+def test_plan_draws_document_fonts_more_often():
+    from generator.recipes.font_style import _plan
+
+    variant = [{"file": "s.ttf", "italic": False, "weight": 400, "weight_range": None}]
+    families = {name: {"variants": variant, "languages": ["en"]} for name in ("Doc", "A", "B", "C")}
+    rows = _plan(3000, families, {"en": 1.0}, random.Random(0), {"Doc": 3})
+    counts = Counter(r[0] for r in rows)
+    assert 2.7 < counts["Doc"] / counts["A"] < 3.3 and abs(counts["A"] - counts["B"]) < 0.1 * counts["A"]
+
+
+def test_document_fonts_come_from_the_cache_offline(tmp_path, monkeypatch):
+    import zipfile
+
+    from generator.recipes import font_style
+
+    folder = tmp_path / "doc_fonts"
+    folder.mkdir()
+    monkeypatch.setattr(font_style, "DOC_FONTS", [("tinos", "Tinos-Regular.ttf")])
+    (folder / "tinos__Tinos-Regular.ttf").write_bytes(b"ttf")
+    url = "https://example.org/fonts/lm.zip"
+    monkeypatch.setattr(
+        font_style, "DOC_FONT_ARCHIVES", [(url, ["lm/otf/lmroman10-regular.otf", "lm/otf/missing.otf"])]
+    )
+    with zipfile.ZipFile(folder / "lm.zip", "w") as z:
+        z.writestr("lm/otf/lmroman10-regular.otf", b"otf")
+    with pytest.raises(KeyError):  # a member missing from the archive is an error, not a silent gap
+        font_style._doc_fonts(tmp_path, offline=True)
+    monkeypatch.setattr(font_style, "DOC_FONT_ARCHIVES", [(url, ["lm/otf/lmroman10-regular.otf"])])
+    paths = font_style._doc_fonts(tmp_path, offline=True)
+    assert [p.name for p in paths] == ["tinos__Tinos-Regular.ttf", "lmroman10-regular.otf"]
+    assert (folder / "lmroman10-regular.otf").read_bytes() == b"otf"
+
+
+def test_known_categories_are_valid():
+    from generator.recipes.font_style import CATEGORIES, KNOWN_CATEGORIES
+
+    assert set(KNOWN_CATEGORIES.values()) <= set(CATEGORIES)
+    assert KNOWN_CATEGORIES["TeX Gyre Termes"] == "SERIF" and KNOWN_CATEGORIES["TeX Gyre Heros"] == "SANS_SERIF"

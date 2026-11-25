@@ -60,22 +60,26 @@ def _build_tiny_font(path, chars):
     fb.save(path)
 
 
-def build_font(path, inked, empty="", family="Shape", style="Regular", weight=400, italic=False, glyph=(80, 560)):
+def build_font(
+    path, inked, empty="", family="Shape", style="Regular", weight=400, italic=False, glyph=(80, 560), scale=1.0
+):
     """A TTF with box glyphs for ``inked`` and outline-less glyphs for ``empty``.
 
     ``family`` / ``style`` / ``weight`` / ``italic`` set the name, OS/2 and post tables
     the way a real face of that style has them; ``glyph`` is the x-extent of the box
-    glyph, so two test families can look different.
+    glyph, so two test families can look different; ``scale`` scales the glyphs and
+    their advance (a copy of another face drawn larger).
     """
     from fontTools.fontBuilder import FontBuilder
     from fontTools.pens.ttGlyphPen import TTGlyphPen
 
     def box():
         pen = TTGlyphPen(None)
-        pen.moveTo((glyph[0], 0))
-        pen.lineTo((glyph[0], 700))
-        pen.lineTo((glyph[1], 700))
-        pen.lineTo((glyph[1], 0))
+        x0, x1, top = round(glyph[0] * scale), round(glyph[1] * scale), round(700 * scale)
+        pen.moveTo((x0, 0))
+        pen.lineTo((x0, top))
+        pen.lineTo((x1, top))
+        pen.lineTo((x1, 0))
         pen.closePath()
         return pen.glyph()
 
@@ -87,7 +91,7 @@ def build_font(path, inked, empty="", family="Shape", style="Regular", weight=40
         glyphs[f"g{i}"] = box() if ch in inked else TTGlyphPen(None).glyph()
     fb.setupGlyf(glyphs)
     fb.setupCharacterMap({ord(ch): f"g{i}" for i, ch in enumerate(chars)})
-    fb.setupHorizontalMetrics(dict.fromkeys(glyphs, (640, 80)))
+    fb.setupHorizontalMetrics(dict.fromkeys(glyphs, (round(640 * scale), round(80 * scale))))
     fb.setupHorizontalHeader(ascent=800, descent=-200)
     fb.setupNameTable({"familyName": family, "styleName": style})
     fb.setupOS2(usWeightClass=weight, fsSelection=0x01 if italic else 0x40)

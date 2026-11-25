@@ -32,9 +32,14 @@ The labels are ground truth by construction:
   light-on-dark); a crop that went through a grayscale scan is named from its pixels.
 * **multilingual**: a family only renders languages whose letters it inks and
   (for complex scripts) shapes; every text is HarfBuzz-checked in its exact face.
+* **one class per design**: a family whose letters for a script are a copy of another
+  family's (Heebo's Latin is Roboto's) does not render that script.
+* **document fonts**: the faces most pages are set in - Times, Helvetica, Courier,
+  Cambria, Computer Modern, ... as free metric-compatible clones (:data:`DOC_FONTS`).
 
-Families are sampled uniformly (balanced classes); within a family, the language
-follows the recipe's script shares. Train and val share the families, not the words.
+Families are sampled uniformly (balanced classes), the document fonts
+:data:`DOC_FONT_WEIGHT` times more often; within a family, the language follows the
+recipe's script shares. Train and val share the families, not the words.
 """
 
 import argparse
@@ -44,6 +49,7 @@ import random
 import shutil
 import sys
 import time
+import zipfile
 import zlib
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -106,10 +112,44 @@ STYLE_FONTS = [
     ("arimo", "Arimo[wght].ttf"), ("arimo", "Arimo-Italic[wght].ttf"),
 ]  # fmt: skip
 
+# The faces most documents are set in, or metric-compatible clones of them, under free
+# licenses: Times (Tinos, TeX Gyre Termes), Helvetica (TeX Gyre Heros), Courier (Cousine),
+# Cambria (Caladea), Palatino (TeX Gyre Pagella), Bookman (TeX Gyre Bonum), Century
+# Schoolbook (TeX Gyre Schola), Verdana-like DejaVu Sans, Comic Sans (Comic Neue) and the
+# Computer Modern of LaTeX papers (Latin Modern). Without them the classifier never sees the
+# faces of most real pages, and names the closest look-alike of another script instead.
+_FACES = ("Regular", "Bold", "Italic", "BoldItalic")
+DOC_FONTS = [
+    *((family, f"{name}-{face}.ttf") for family, name in (("tinos", "Tinos"), ("cousine", "Cousine"),
+                                                           ("caladea", "Caladea"), ("comicneue", "ComicNeue"))
+      for face in _FACES),
+]  # fmt: skip
+# Fonts outside Google Fonts: (archive URL, members) - TeX Gyre and Latin Modern (GUST font
+# license), DejaVu (Bitstream Vera license).
+DOC_FONT_ARCHIVES = [
+    ("https://mirrors.ctan.org/fonts/tex-gyre.zip",
+     [f"tex-gyre/opentype/texgyre{name}-{face}.otf" for name in ("termes", "heros", "pagella", "bonum", "schola")
+      for face in ("regular", "bold", "italic", "bolditalic")]),
+    ("https://mirrors.ctan.org/fonts/lm.zip",
+     [f"lm/fonts/opentype/public/lm/{name}.otf" for name in (
+         "lmroman10-regular", "lmroman10-bold", "lmroman10-italic", "lmroman10-bolditalic",
+         "lmsans10-regular", "lmsans10-bold", "lmsans10-oblique", "lmsans10-boldoblique",
+         "lmmono10-regular", "lmmono10-italic")]),
+    ("https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip",
+     [f"dejavu-fonts-ttf-2.37/ttf/{name}.ttf" for name in (
+         "DejaVuSans", "DejaVuSans-Bold", "DejaVuSans-Oblique", "DejaVuSans-BoldOblique",
+         "DejaVuSansMono", "DejaVuSansMono-Bold", "DejaVuSansMono-Oblique", "DejaVuSansMono-BoldOblique")]),
+]  # fmt: skip
+# Real pages are mostly set in these faces: they are drawn this many times more often than the
+# other families (the classifier's prior then follows documents, not the font collection).
+DOC_FONT_WEIGHT = 3
+
 # What a crop is set in. Weights follow documents (regular and bold most often) but
 # every weight a face offers appears; underlines, strike-outs and highlights are the
-# emphasis marks of issue #2025, coloured ink one crop in three.
-BOLD_SHARE = 0.35
+# emphasis marks of issue #2025, coloured ink one crop in three. Bold stays a minority as on
+# real pages: with a third of the crops bold, a classifier calls the short words of a
+# regular page (rendered at 144 dpi, ~20 px high) bold whenever their strokes are ambiguous.
+BOLD_SHARE = 0.2
 ITALIC_SHARE = 0.3
 WEIGHT_PRIOR = {100: 0.03, 200: 0.05, 300: 0.12, 400: 0.3, 500: 0.12, 600: 0.1, 700: 0.18, 800: 0.06, 900: 0.04}
 UNDERLINE_PRIOR = {0: 0.84, 1: 0.12, 2: 0.04}
@@ -126,6 +166,16 @@ INK_HUES = {
     "yellow": (240, 200, 30),
 }
 CATEGORIES = ("SANS_SERIF", "SERIF", "DISPLAY", "HANDWRITING", "MONOSPACE", "UNKNOWN")
+# Families outside Google Fonts have no category there, and their names do not tell it:
+# without these, TeX Gyre Termes (Times) would be UNKNOWN next to Tinos (Times) as SERIF.
+KNOWN_CATEGORIES = {
+    **dict.fromkeys(("TeX Gyre Termes", "TeX Gyre Pagella", "TeX Gyre Bonum", "TeX Gyre Schola", "Latin Modern Roman",
+                     "Aparajita", "Roman Unicode", "Code2000", "Kelvinch", "Javanese Text", "站酷小薇体"), "SERIF"),
+    **dict.fromkeys(("TeX Gyre Heros", "Latin Modern Sans", "Arial", "BPG Arial", "Aksaramatee", "Rounded Mplus 1c",
+                     "TH Sarabun New", "lipipragatuchhi"), "SANS_SERIF"),
+    **dict.fromkeys(("TeX Gyre Cursor", "Latin Modern Mono"), "MONOSPACE"),
+    "Nanum Pen": "HANDWRITING",
+}  # fmt: skip
 
 
 # =============================================================================
@@ -142,6 +192,34 @@ def _style_fonts(cache: Path, offline: bool) -> list[Path]:
         path = str(local) if local.exists() else (downloader._download(family, filename) if not offline else None)
         if path:
             out.append(Path(path))
+    return out
+
+
+def _doc_fonts(cache: Path, offline: bool) -> list[Path]:
+    """The :data:`DOC_FONTS` and :data:`DOC_FONT_ARCHIVES` faces (downloaded once into ``cache/doc_fonts``)."""
+    folder = cache / "doc_fonts"
+    folder.mkdir(parents=True, exist_ok=True)
+    downloader = FontDownloader(cache_dir=str(folder), enabled=not offline)
+    out = []
+    for family, filename in DOC_FONTS:
+        local = folder / f"{family}__{filename}"
+        path = str(local) if local.exists() else (downloader._download(family, filename) if not offline else None)
+        if path:
+            out.append(Path(path))
+    for url, members in DOC_FONT_ARCHIVES:
+        missing = [m for m in members if not (folder / m.rsplit("/", 1)[-1]).exists()]
+        archive = folder / url.rsplit("/", 1)[-1]
+        if missing and not archive.exists() and not offline:
+            data = http_get(url, timeout=600)
+            if data:
+                archive.write_bytes(data)
+            else:
+                print(f"  WARNING: could not download {url}")
+        if missing and archive.exists():
+            with zipfile.ZipFile(archive) as z:
+                for member in missing:
+                    (folder / member.rsplit("/", 1)[-1]).write_bytes(z.read(member))
+        out += [folder / m.rsplit("/", 1)[-1] for m in members if (folder / m.rsplit("/", 1)[-1]).exists()]
     return out
 
 
@@ -196,15 +274,15 @@ def _merge_duplicates(families: dict[str, dict]) -> dict[str, dict]:
 _PROBES = {"LATIN": "Hamburgefonstiv", "CYRILLIC": "Шрифтовобразец", "GREEK": "Γραμματοσειρά"}
 
 
-def _look(font_dir: Path, variants: dict, text: str) -> tuple[float, np.ndarray] | None:
-    """``text`` in the family at weight ~400, upright, 48 px, baseline-aligned: (advance, bitmap)."""
+def _look(font_dir: Path, variants: dict, text: str, size: float = 48) -> tuple[float, np.ndarray] | None:
+    """``text`` in the family at weight ~400, upright, ``size`` px, baseline-aligned: (advance, bitmap)."""
 
     def score(v: dict) -> tuple[bool, int]:
         lo, hi = v["weight_range"] or (v["weight"], v["weight"])
         return bool(v["italic"]), 0 if lo <= 400 <= hi else abs(int(v["weight"]) - 400)
 
     variant = min(variants.values(), key=score)
-    font = ImageFont.truetype(str(font_dir / variant["file"]), 48)
+    font = ImageFont.truetype(str(font_dir / variant["file"]), size)
     if variant["weight_range"]:
         set_weight(font, 400)
     width = font.getlength(text)
@@ -216,12 +294,20 @@ def _look(font_dir: Path, variants: dict, text: str) -> tuple[float, np.ndarray]
     return width, np.asarray(img, dtype=np.float32) / 255.0
 
 
+# Widest scaling between a family and a copy of its letters (Noto Sans JP draws the Latin of
+# Source Sans 12% larger): the copy is then compared rendered at the size of the original.
+MAX_COPY_SCALE = 1.15
+
+
 def _same_look(a: tuple[float, np.ndarray], b: tuple[float, np.ndarray]) -> bool:
     """Same advance (within 0.5%) and nearly the same ink: a copy, not a look-alike.
 
-    Measured on Latin: copies 0.00-0.10 (Noto Sans Arabic = Noto Sans, Anek Odia =
-    Anek Tamil), metric-compatible designs 0.17 (Arial vs Arimo); condensed cuts
-    differ in width.
+    Measured on Latin, the copies rendered at the size of the original: copies 0.00-0.126
+    (Noto Sans Arabic = Noto Sans, Khula = Open Sans 0.08, Heebo = Roboto 0.10, Mada and
+    Assistant = the Source Sans of Noto Sans JP 0.11, the Times-like Latin of Roman Unicode,
+    Tai Heritage Pro and Scheherazade New 0.06-0.13), metric-compatible designs from 0.15
+    (Arial vs Arimo 0.15, Arimo vs TeX Gyre Heros 0.18); condensed cuts differ in shape once
+    scaled to the same advance.
     """
     (wa, img_a), (wb, img_b) = a, b
     if abs(wa - wb) > 0.005 * max(wa, wb):
@@ -230,7 +316,7 @@ def _same_look(a: tuple[float, np.ndarray], b: tuple[float, np.ndarray]) -> bool
     img_a = np.pad(img_a, ((0, 0), (0, w - img_a.shape[1])))
     img_b = np.pad(img_b, ((0, 0), (0, w - img_b.shape[1])))
     ink = np.maximum(img_a, img_b) > 0.3
-    return bool(ink.any()) and float(np.abs(img_a - img_b)[ink].mean()) < 0.11
+    return bool(ink.any()) and float(np.abs(img_a - img_b)[ink].mean()) < 0.135
 
 
 def _probes(langs: list[str], pools: dict[str, list[str]]) -> dict[str, tuple[str, list[str]]]:
@@ -288,9 +374,14 @@ def _borrowed(
 
         for i, name in enumerate(names):
             for other in names[i + 1 :]:
-                if looks[other][0] > looks[name][0] * 1.005:
+                scale = looks[other][0] / looks[name][0]
+                if scale > MAX_COPY_SCALE:
                     break
-                if _same_look(looks[name], looks[other]):
+                # A scaled copy is compared at the size where it has the advance of ``name``
+                look = (
+                    looks[other] if scale <= 1.005 else _look(font_dir, families[other]["variants"], text, 48 / scale)
+                )
+                if look is not None and _same_look(looks[name], look):
                     parent[root(other)] = root(name)
         groups: dict[str, list[str]] = defaultdict(list)
         for name in names:
@@ -321,20 +412,28 @@ def _pick_weight(variant: dict, bold: bool, rng: random.Random) -> int:
     return rng.choices(ws, weights=[WEIGHT_PRIOR[w] for w in ws])[0]
 
 
-def _plan(n: int, families: dict, lang_weights: dict[str, float], rng: random.Random) -> list[tuple]:
+def _plan(
+    n: int,
+    families: dict,
+    lang_weights: dict[str, float],
+    rng: random.Random,
+    family_weights: dict[str, int] | None = None,
+) -> list[tuple]:
     """``(family, file, weight, lang, seed)`` per crop.
 
     Bold and italic are drawn first (:data:`BOLD_SHARE`, :data:`ITALIC_SHARE`): most
     static faces stop at weight 500 and many families have no italic, so balancing
     families alone would leave both rare. The family is then taken in turns from
-    those that can provide the combination (all families when none can).
+    those that can provide the combination (all families when none can), each family
+    ``family_weights[family]`` turns per round (one by default).
     """
     queues: dict[tuple, list[str]] = {}
 
     def next_family(names: list[str], key: tuple) -> str:
         queue = queues.setdefault(key, [])
         if not queue:
-            queue.extend(rng.sample(names, len(names)))
+            turns = [name for name in names for _ in range((family_weights or {}).get(name, 1))]
+            queue.extend(rng.sample(turns, len(turns)))
         return queue.pop()
 
     rows = []
@@ -380,6 +479,8 @@ def prepare(args) -> None:
     print("Fonts ...")
     paths = collect_fonts(Path(args.font_src), cache / "google_fonts", download_extra=not args.offline)
     paths += _style_fonts(cache, args.offline)
+    doc_paths = _doc_fonts(cache, args.offline)
+    paths += doc_paths
     fonts = scan_fonts(paths, cache / "font_scan.json")
     freq = {lang: Counter(c for w in ws for c in w) for lang, ws in pools.items()}
     lang_fonts, _ = assign_fonts(fonts, freq, langs)
@@ -410,7 +511,7 @@ def prepare(args) -> None:
     for name, fam in families.items():
         fam["languages"] = sorted(fam["languages"])
         fam["variants"] = sorted(fam["variants"].values(), key=lambda v: v["file"])
-        fam["category"] = _category(name, cache / "gf_categories.json", args.offline)
+        fam["category"] = KNOWN_CATEGORIES.get(name) or _category(name, cache / "gf_categories.json", args.offline)
 
     print("Texts ...")
     for lang in langs:
@@ -443,8 +544,11 @@ def prepare(args) -> None:
         },
         indent=1,
     )
+    doc_families = {font_traits(str(p)).family for p in doc_paths} & set(families)
+    print(f"  document fonts: {', '.join(sorted(doc_families))} (x{DOC_FONT_WEIGHT})")
+    weights = dict.fromkeys(doc_families, DOC_FONT_WEIGHT)
     for split, n in (("train", args.num_train), ("val", args.num_val)):
-        rows = _plan(n, families, lang_weights, random.Random(SEED + (split == "val")))
+        rows = _plan(n, families, lang_weights, random.Random(SEED + (split == "val")), weights)
         lines = ["\t".join(map(str, r)) for r in rows]
         (meta / f"{split}_plan.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
 

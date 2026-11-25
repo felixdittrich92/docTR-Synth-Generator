@@ -184,6 +184,10 @@ python scripts/build_font_style.py --out font_style        # 300k crops, 99 lang
 python -m generator.recipes.font_style preview --out font_style
 ```
 
+The families include free metric-compatible clones of the faces most documents are set in (Times, Helvetica,
+Courier, Cambria, Palatino, Computer Modern, ...), drawn more often than the others, and a family whose letters for
+a script copy another family's (even scaled) does not render that script: one class per design.
+
 ```json
 "000042.jpg": {"text": "Rechnung", "lang": "de", "family": "Noto Serif", "category": "SERIF",
                "font": "Noto Serif Bold Italic", "weight": 700, "bold": true, "italic": true,

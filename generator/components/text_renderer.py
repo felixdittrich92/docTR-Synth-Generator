@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from ..augmentations import AugmentationPipeline, RandomBlur, RandomPerspective, RandomPixelDropout, RandomRotate
 from .config import GenerationConfig
+from .font_styles import Decorations, font_traits, set_weight
 
 __all__ = ["TextRenderer", "TextStyle"]
 
@@ -74,14 +75,17 @@ class TextRenderer:
             self.geometry_augs = AugmentationPipeline([])
             self.detail_augs = AugmentationPipeline([])
 
-        self._font_cache: OrderedDict[tuple[str, int], ImageFont.FreeTypeFont] = OrderedDict()
+        self._font_cache: OrderedDict[tuple[str, int, int | None], ImageFont.FreeTypeFont] = OrderedDict()
         self._font_cache_size = 128
 
-    def _get_font(self, font_path: str, size: int) -> ImageFont.FreeTypeFont:
-        key = (font_path, size)
+    def _get_font(self, font_path: str, size: int, weight: int | None = None) -> ImageFont.FreeTypeFont:
+        """A cached face; ``weight`` selects an instance of a variable font (its ``wght`` axis)."""
+        key = (font_path, size, weight)
         font = self._font_cache.get(key)
         if font is None:
             font = ImageFont.truetype(font_path, size)
+            if weight is not None and font_traits(font_path).weight_range is not None:
+                set_weight(font, weight)
             self._font_cache[key] = font
             if len(self._font_cache) > self._font_cache_size:
                 self._font_cache.popitem(last=False)
@@ -120,14 +124,29 @@ class TextRenderer:
         height = int((bottom - top) + 2 * self.config.recognition.padding)
         return max(1, width), max(1, height)
 
-    def _draw(self, text: str, font_path: str, font_size: int, style: TextStyle) -> Image.Image:
-        """Draw the styled glyph at the supersampled scale (no augmentation yet)."""
+    def _draw(
+        self,
+        text: str,
+        font_path: str,
+        font_size: int,
+        style: TextStyle,
+        weight: int | None = None,
+        decorations: Decorations | None = None,
+    ) -> Image.Image:
+        """Draw the styled glyph at the supersampled scale (no augmentation yet).
+
+        ``decorations`` add underline / strike-out lines from the font's own metrics,
+        drawn in the same ink so they recolour, blur and warp with the word.
+        """
         ss = self.supersample
         pad = self.config.recognition.padding * ss
-        font = self._get_font(font_path, font_size * ss)
+        font = self._get_font(font_path, font_size * ss, weight)
 
         stroke = max(style.bold_width, style.outline_width)
         left, top, right, bottom = font.getbbox(text, stroke_width=stroke)
+        lines = self._decoration_lines(text, font, font_path, decorations) if decorations and decorations.any else []
+        for lx0, ly0, lx1, ly1 in lines:  # grow the canvas so a low underline is not cut off
+            left, top, right, bottom = min(left, lx0), min(top, ly0), max(right, lx1), max(bottom, ly1)
         width = int((right - left) + 2 * pad)
         height = int((bottom - top) + 2 * pad)
 
@@ -149,7 +168,36 @@ class TextRenderer:
             draw.text(pos, text, font=font, fill=fill, stroke_width=style.bold_width, stroke_fill=fill)
         else:
             draw.text(pos, text, font=font, fill=fill)
+        for lx0, ly0, lx1, ly1 in lines:
+            draw.rectangle((pos[0] + lx0, pos[1] + ly0, pos[0] + lx1, pos[1] + ly1), fill=fill)
         return image
+
+    @staticmethod
+    def _decoration_lines(
+        text: str, font: ImageFont.FreeTypeFont, font_path: str, decorations: Decorations
+    ) -> list[tuple[float, float, float, float]]:
+        """Underline / double underline / strike-out rectangles, relative to the text origin.
+
+        Positions and thicknesses come from the face's ``post`` and ``OS/2`` tables,
+        so a light serif gets a hairline and a heavy grotesque a thick rule, as in a
+        word processor. A double underline is two such rules, one thickness apart.
+        """
+        traits = font_traits(font_path)
+        scale = font.size / traits.units_per_em
+        baseline = font.getmetrics()[0]
+        width = font.getlength(text)
+        lines = []
+        u_pos, u_thick = traits.underline
+        t = max(1.0, u_thick * scale)
+        y = baseline - u_pos * scale - t / 2
+        for k in range(decorations.underline):
+            lines.append((0.0, y + k * 2 * t, width, y + k * 2 * t + t))
+        if decorations.strikethrough:
+            s_pos, s_thick = traits.strikeout
+            ts = max(1.0, s_thick * scale)
+            ys = baseline - s_pos * scale - ts / 2
+            lines.append((0.0, ys, width, ys + ts))
+        return lines
 
     def _augment(self, image: Image.Image) -> Image.Image:
         """Geometry distortions (at supersample) -> downsample -> ink detail."""
@@ -159,14 +207,23 @@ class TextRenderer:
             image = image.resize(new_size, Image.Resampling.LANCZOS)
         return self.detail_augs(image)
 
-    def render_coverage(self, text: str, font_path: str, font_size: int, bold_width: int = 0) -> Image.Image:
+    def render_coverage(
+        self,
+        text: str,
+        font_path: str,
+        font_size: int,
+        bold_width: int = 0,
+        weight: int | None = None,
+        decorations: Decorations | None = None,
+    ) -> Image.Image:
         """Render a black glyph coverage map (RGBA) for the generator to recolour.
 
         This is the fast common path: a single draw + augment, recoloured later
         from the alpha channel. Anti-aliased edges are preserved by the alpha.
+        ``weight`` picks an instance of a variable face, ``decorations`` adds lines.
         """
         style = TextStyle(fill_color=(0, 0, 0), opacity=255, bold_width=bold_width)
-        return self._augment(self._draw(text, font_path, font_size, style))
+        return self._augment(self._draw(text, font_path, font_size, style, weight, decorations))
 
     def render_text_to_image(
         self,

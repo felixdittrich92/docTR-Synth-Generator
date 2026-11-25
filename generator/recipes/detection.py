@@ -148,13 +148,13 @@ def _is_gb2312(w: str) -> bool:
         return False
 
 
-def clean_pool(lang: str, words: list[str], rng: random.Random) -> tuple[list[str], Counter]:
+def clean_pool(lang: str, words: list[str], rng: random.Random, max_len: int = 24) -> tuple[list[str], Counter]:
     """Length, script and mojibake filtering; scripts without spaces get clause-length tokens."""
     allowed = allowed_scripts(lang)
     stats: Counter = Counter()
     out: dict[str, None] = {}
     for w in words:
-        if not (1 <= len(w) <= 24) or not any(c.isalpha() for c in w):
+        if not (1 <= len(w) <= max_len) or not any(c.isalpha() for c in w):
             stats["length_or_no_letters"] += 1
         elif not (sc := letter_scripts(w)) or not sc <= allowed:
             stats["wrong_or_mixed_script"] += 1

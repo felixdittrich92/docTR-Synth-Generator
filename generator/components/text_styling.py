@@ -100,13 +100,17 @@ def decide_text_style(
     bold_width: int = 0,
     outline_width: int = 0,
     palette: PagePalette | None = None,
+    ink_hue: tuple[int, int, int] | None = None,
+    neutral: bool = False,
 ) -> TextStyle:
     """Decide ink colour, polarity and contrast from the background.
 
     Supports dark-on-light *and* light-on-dark text across a controllable
     contrast range, with neutral or colourful ink - the variety real captures
     contain. Pass a ``palette`` from :func:`sample_page_palette` to keep a whole
-    page in one ink instead of re-rolling per block.
+    page in one ink instead of re-rolling per block. ``ink_hue`` asks for a
+    colour (its luminance is still fitted to the background), ``neutral`` for
+    black/gray/white ink only.
     """
     bg_np = np.array(bg_img.convert("RGB"), dtype=np.float32).reshape(-1, 3)
     avg = bg_np.mean(axis=0)
@@ -138,7 +142,11 @@ def decide_text_style(
     else:
         base = avg + (255.0 - avg) * contrast
 
-    if followed is not None:
+    if ink_hue is not None:
+        hue = np.asarray(ink_hue, dtype=np.float64)
+    elif neutral:
+        hue = None
+    elif followed is not None:
         hue = followed["hue"] if followed["colored"] else None
     elif random.random() < config.realism.colored_ink_prob:
         hue = np.random.uniform(20, 235, size=3)

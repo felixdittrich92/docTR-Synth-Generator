@@ -8,14 +8,16 @@
 
     python -m generator.recipes.detection prepare --languages en,de,ru,ar,hi,ja,he,el --out /tmp/det
     python -m generator.recipes.recognition prepare --languages all --out /tmp/rec --num-train 300000
-    python scripts/generate_grid.py --det /tmp/det --rec /tmp/rec -o docs/examples.jpg
+    python -m generator.recipes.font_style all --out /tmp/style --num-train 20000 --num-val 2000
+    python scripts/generate_grid.py --det /tmp/det --rec /tmp/rec --style /tmp/style -o docs/examples.jpg
 
 Two rows of detection pages (one layout and language each, plus a text-free hard
 negative), then printed and handwritten recognition crops in many scripts, each with
-its exact label.
+its exact label, and font style crops with their family, weight and emphasis labels.
 """
 
 import argparse
+import json
 import random
 from argparse import Namespace
 from collections import defaultdict
@@ -61,7 +63,25 @@ HAND_CROPS = [
     ("LATIN", "de"), ("CYRILLIC", "ru"), ("GREEK", "el"), ("ARABIC", "ar"), ("THAI", "th"), ("CJK", "ja"),
     ("HANGUL", "ko"),
 ]  # fmt: skip
+# Font style examples: one crop per (description, test on its label record), two rows of seven.
+STYLE_PICKS = [
+    ("bold", lambda r: r["weight"] >= 700 and r["lang"] in ("en", "de", "fr") and not r["italic"]),
+    ("italic", lambda r: r["italic"] and r["weight"] <= 500 and r["lang"] in ("en", "es", "it")),
+    ("double underline", lambda r: r["underline"] == "double" and r["lang"] in ("en", "de", "fr", "es")),
+    ("strike", lambda r: r["strikethrough"]),
+    ("highlight", lambda r: r["highlight"] is not None and r["color"] == "black"),
+    ("red", lambda r: r["color"] == "red" and r["weight"] >= 600),
+    ("thin", lambda r: r["weight"] <= 200),
+    ("arabic", lambda r: r["lang"] in ("ar", "fa", "ur") and r["weight"] >= 600),
+    ("hebrew", lambda r: r["lang"] == "he"),
+    ("devanagari", lambda r: r["lang"] in ("hi", "mr", "ne") and r["underline"] != "none"),
+    ("cjk", lambda r: r["lang"] in ("zh", "ja", "ko") and r["weight"] >= 600),
+    ("cyrillic", lambda r: r["lang"] in ("ru", "uk", "bg") and r["italic"]),
+    ("blue", lambda r: r["color"] == "blue"),
+    ("black weight", lambda r: r["weight"] >= 900),
+]
 WIDTH, MARGIN, GAP, RADIUS = 2400, 40, 22, 14
+STYLE_CELL_H = 128
 PAGE_H = 440
 CROP_H, CELL_H, COLS = 46, 104, 7
 BG, CARD, INK, MUTED, LABEL = (236, 239, 243), (255, 255, 255), (32, 36, 46), (104, 112, 128), (196, 44, 44)
@@ -162,6 +182,28 @@ def recognition_crops(rec_out: Path, bg_dir: str | None, seed: int) -> list[tupl
     return crops
 
 
+def style_crops(style_out: Path, seed: int) -> list[tuple[Image.Image, dict]]:
+    """One rendered font style crop per :data:`STYLE_PICKS` entry - the clearest of its matches."""
+    folders = [style_out / "val", *sorted((style_out / "train").glob("shard_*"))]
+    records = []
+    for folder in folders:
+        if (folder / "labels.json").exists():
+            labels = json.loads((folder / "labels.json").read_text(encoding="utf-8"))
+            records += [(folder / "images" / name, r) for name, r in labels.items()]
+    rng = random.Random(seed)
+    rng.shuffle(records)
+    picked, families = [], set()
+    for _, test in STYLE_PICKS:
+        matches = [(p, r) for p, r in records if test(r) and r["family"] not in families and len(r["text"]) >= 3][:30]
+        if not matches:
+            continue
+        crops = [(Image.open(p).convert("RGB"), r) for p, r in matches]
+        best = max(crops, key=lambda c: _clarity(c[0]))
+        picked.append(best)
+        families.add(best[1]["family"])
+    return picked
+
+
 def _clarity(img: Image.Image) -> float:
     """Contrast x sharpness at docTR's crop height: picks a readable example for the sheet."""
     g = np.asarray(img.convert("L").resize((max(8, img.width * 32 // img.height), 32)), dtype=np.float32)
@@ -196,8 +238,8 @@ def _card(sheet: Image.Image, box: tuple[int, int, int, int]) -> None:
     ImageDraw.Draw(sheet).rounded_rectangle(box, RADIUS, fill=CARD)
 
 
-def compose(pages, crops, ui_font: str, selector: ManifestFontSelector) -> Image.Image:
-    """Headings, two rows of pages and the crop grid on one sheet."""
+def compose(pages, crops, ui_font: str, selector: ManifestFontSelector, styles=()) -> Image.Image:
+    """Headings, two rows of pages, the crop grid and the font style grid on one sheet."""
     title = ImageFont.truetype(ui_font, 34)
     small = ImageFont.truetype(ui_font, 19)
 
@@ -228,6 +270,8 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector) -> Image
     crop_rows = (len(printed) + COLS - 1) // COLS + (len(written) + COLS - 1) // COLS
     height = MARGIN + 58 + sum(r[0][0].height + 46 + GAP for r in layout)
     height += 70 + crop_rows * (CELL_H + GAP) + (40 if written else 0) + MARGIN
+    if styles:
+        height += 70 + ((len(styles) + COLS - 1) // COLS) * (STYLE_CELL_H + GAP)
     sheet = Image.new("RGB", (WIDTH, height), BG)
 
     def heading(y: int, text: str, sub: str) -> None:
@@ -278,6 +322,31 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector) -> Image
         font = ImageFont.truetype(path, 19) if path else small
         tw = draw.textlength(text, font=font)
         draw.text((cx + (cell_w - tw) / 2, cy + CROP_H + 24), text, fill=LABEL, font=font)
+    if styles:
+        y += ((len(slots) and max(i for i, _ in slots)) // COLS + 1) * (CELL_H + GAP) + (40 if written else 0) + 12
+        heading(
+            y, "Font style", "word crops labelled with family, weight, italic, underline, strike-through and colour"
+        )
+        y += 58
+        for i, (crop, r) in enumerate(styles):
+            cx = MARGIN + (i % COLS) * (cell_w + GAP)
+            cy = y + (i // COLS) * (STYLE_CELL_H + GAP)
+            _card(sheet, (cx, cy, cx + cell_w, cy + STYLE_CELL_H))
+            draw = ImageDraw.Draw(sheet)
+            im = crop.resize((max(1, int(crop.width * CROP_H / crop.height)), CROP_H), Image.Resampling.LANCZOS)
+            if im.width > cell_w - 20:
+                im = im.resize(
+                    (cell_w - 20, max(1, int(im.height * (cell_w - 20) / im.width))), Image.Resampling.LANCZOS
+                )
+            sheet.paste(im, (cx + (cell_w - im.width) // 2, cy + 12 + (CROP_H - im.height) // 2))
+            tags = [r["color"]]
+            tags += [f"{r['underline']} underline"] if r["underline"] != "none" else []
+            tags += ["strike"] if r["strikethrough"] else []
+            tags += [f"{r['highlight']} highlight"] if r["highlight"] else []
+            for k, (line, colour) in enumerate(((r["font"], LABEL), (" · ".join(tags), MUTED))):
+                face = _fit(line, cell_w - 12)
+                tw = draw.textlength(line, font=face)
+                draw.text((cx + (cell_w - tw) / 2, cy + CROP_H + 24 + k * 24), line, fill=colour, font=face)
     return sheet
 
 
@@ -286,6 +355,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--det", required=True, help="prepared detection build (generator.recipes.detection prepare)")
     p.add_argument("--rec", required=True, help="prepared recognition build (generator.recipes.recognition prepare)")
+    p.add_argument("--style", default=None, help="rendered font style build (generator.recipes.font_style)")
     p.add_argument("--bg-dir", default=None, help="background images (default: the curated download)")
     p.add_argument("--ui-font", default=None, help="font for headings and captions (default: Inter from --rec)")
     p.add_argument("-o", "--output", default="docs/examples.jpg")
@@ -299,10 +369,11 @@ def main() -> None:
     pages = detection_pages(Path(args.det), args.bg_dir, args.seed)
     crops = recognition_crops(rec, args.bg_dir, args.seed)
     selector = ManifestFontSelector(rec / "meta" / "fonts", handwriting=False)
-    sheet = compose(pages, crops, ui_font, selector)
+    styles = style_crops(Path(args.style), args.seed) if args.style else []
+    sheet = compose(pages, crops, ui_font, selector, styles)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     sheet.save(args.output, quality=88, optimize=True)
-    print(args.output, sheet.size, f"{len(pages)} pages, {len(crops)} crops")
+    print(args.output, sheet.size, f"{len(pages)} pages, {len(crops)} crops, {len(styles)} style crops")
 
 
 if __name__ == "__main__":

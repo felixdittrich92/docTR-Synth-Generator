@@ -60,17 +60,22 @@ def _build_tiny_font(path, chars):
     fb.save(path)
 
 
-def build_font(path, inked, empty=""):
-    """A TTF with box glyphs for ``inked`` and outline-less glyphs for ``empty``."""
+def build_font(path, inked, empty="", family="Shape", style="Regular", weight=400, italic=False, glyph=(80, 560)):
+    """A TTF with box glyphs for ``inked`` and outline-less glyphs for ``empty``.
+
+    ``family`` / ``style`` / ``weight`` / ``italic`` set the name, OS/2 and post tables
+    the way a real face of that style has them; ``glyph`` is the x-extent of the box
+    glyph, so two test families can look different.
+    """
     from fontTools.fontBuilder import FontBuilder
     from fontTools.pens.ttGlyphPen import TTGlyphPen
 
     def box():
         pen = TTGlyphPen(None)
-        pen.moveTo((80, 0))
-        pen.lineTo((80, 700))
-        pen.lineTo((560, 700))
-        pen.lineTo((560, 0))
+        pen.moveTo((glyph[0], 0))
+        pen.lineTo((glyph[0], 700))
+        pen.lineTo((glyph[1], 700))
+        pen.lineTo((glyph[1], 0))
         pen.closePath()
         return pen.glyph()
 
@@ -84,9 +89,9 @@ def build_font(path, inked, empty=""):
     fb.setupCharacterMap({ord(ch): f"g{i}" for i, ch in enumerate(chars)})
     fb.setupHorizontalMetrics(dict.fromkeys(glyphs, (640, 80)))
     fb.setupHorizontalHeader(ascent=800, descent=-200)
-    fb.setupNameTable({"familyName": "Shape", "styleName": "Regular"})
-    fb.setupOS2()
-    fb.setupPost()
+    fb.setupNameTable({"familyName": family, "styleName": style})
+    fb.setupOS2(usWeightClass=weight, fsSelection=0x01 if italic else 0x40)
+    fb.setupPost(italicAngle=-12 if italic else 0, underlinePosition=-100, underlineThickness=50)
     fb.save(path)
     return path
 

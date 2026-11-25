@@ -7,10 +7,11 @@
 # docTR-Synth-Generator
 
 Synthetic training data for [docTR](https://github.com/mindee/doctr): word crops for
-**text recognition** and full document pages with word polygons for **text detection**,
-in ~100 languages and 24 scripts.
+**text recognition**, full document pages with word polygons for **text detection**, and word crops
+labelled with their **font style** (family, weight, italic, underline, colour ...), in ~100 languages
+and 24 scripts.
 
-![Detection pages (top) and recognition crops with their labels (bottom)](https://github.com/felixdittrich92/docTR-Synth-Generator/raw/main/docs/examples.jpg)
+![Detection pages (top), recognition crops with their labels (middle) and font style crops (bottom)](https://github.com/felixdittrich92/docTR-Synth-Generator/raw/main/docs/examples.jpg)
 
 - **Zero-config** - real words, matching fonts and paper backgrounds are downloaded and cached on first use.
 - **Labels that match the pixels** - every word is shaped with HarfBuzz before a font is used for it, so no
@@ -138,6 +139,7 @@ Or run a ready-made build end to end (resumable; extra recipe options are passed
 ```bash
 python scripts/build_multilingual_detection.py   --out multilingual_det  # ~120k pages, 99 languages (~31 GB)
 python scripts/build_multilingual_recognition.py --out multilingual_rec  # 1.2M crops, 96 languages, no zh/ja/ko
+python scripts/build_font_style.py               --out font_style        # 300k style-labelled crops, 99 languages
 ```
 
 `--languages` takes `european`, `multilingual` (every non-CJK vocab: 96 languages) or `all`, or
@@ -170,6 +172,31 @@ How the recipes keep each image and its label in agreement:
 - `verify` recounts the labels that were actually written, and `topup` renders whatever is short.
 - Validation shares no word with training, and words that look identical in another script
   (Cyrillic `се` vs Latin `ce`) are left out.
+
+## Font style classification
+
+Word crops labelled with how they are set - for a font style classifier next to docTR's orientation
+models ([mindee/doctr#2025](https://github.com/mindee/doctr/issues/2025)), with font families as
+classes like [Lens](https://github.com/mixfont/lens):
+
+```bash
+python scripts/build_font_style.py --out font_style        # 300k crops, 99 languages
+python -m generator.recipes.font_style preview --out font_style
+```
+
+```json
+"000042.jpg": {"text": "Rechnung", "lang": "de", "family": "Noto Serif", "category": "SERIF",
+               "font": "Noto Serif Bold Italic", "weight": 700, "bold": true, "italic": true,
+               "underline": "double", "strikethrough": false, "highlight": null, "color": "red"}
+```
+
+`meta/classes.json` holds `class_to_idx` for the families, `meta/families.json` each family's
+category, languages and variants, `meta/attributes.json` the values of every attribute. The labels
+are ground truth by construction: weights come from variable fonts (100-900) and italics from italic
+faces - no faux bold, no slanted regular faces; underlines and strike-outs use each font's own
+metrics; the colour is the ink a reader sees, measured after scanning. Script families only render
+their own script when their Latin letters are copied from another family (German in "Noto Sans
+Arabic" *is* Noto Sans), so no two classes share a look.
 
 ## Train on the fly
 
@@ -207,7 +234,8 @@ make style     # format and auto-fix
 ```
 
 To regenerate the image at the top, prepare one detection and one recognition build and run
-`python scripts/generate_grid.py --det <det build> --rec <rec build> -o docs/examples.jpg` (both built with `--languages all`).
+`python scripts/generate_grid.py --det <det build> --rec <rec build> --style <font style build> -o docs/examples.jpg`
+(all built with `--languages all`; the font style build rendered).
 
 ## Citation
 

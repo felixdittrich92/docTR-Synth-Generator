@@ -162,6 +162,7 @@ generator/version.py
 /european_rec/
 /multilingual_rec/
 /multilingual_det/
+/font_style/
 /_legacy_scripts/
 
 # Testfiles

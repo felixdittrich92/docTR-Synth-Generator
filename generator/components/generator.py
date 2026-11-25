@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw
 from .background_manager import BackgroundManager
 from .config import GenerationConfig
 from .font_selector import FontSelector
+from .font_styles import StyleSpec, color_name, paint_highlight
 from .legibility import DegradationBudget, local_ink_contrast
 from .scan import apply_scan_tone
 from .text_renderer import TextRenderer, TextStyle
@@ -64,6 +65,7 @@ class TextImageGenerator:
             verify_shaping=config.resources.verify_shaping,
         )
         self.text_renderer = TextRenderer(config)
+        self._last_ink: tuple[int, ...] = (0, 0, 0)  # ink of the last styled compose (for its colour label)
         self.background_manager = BackgroundManager(
             config.resources.bg_image_dir,
             cache_size=config.resources.bg_cache_size,
@@ -116,7 +118,20 @@ class TextImageGenerator:
         font_path = font_path or self.font_selector.get_font_for_text(text)
         if not font_path:
             return None
+        result = self._generate(text, font_path, None)
+        return result[0] if result else None
 
+    def generate_styled(self, text: str, font_path: str, spec: StyleSpec) -> tuple[Image.Image, dict] | None:
+        """A crop of ``text`` in ``font_path`` drawn in ``spec``, and what it shows.
+
+        For font-style data: no faux bold, no outline and no neighbouring-line context
+        (a table rule in the margin would look like an underline). Returns the image
+        and ``{"color": ...}``, the ink colour measured on the finished crop.
+        """
+        return self._generate(text, font_path, spec)
+
+    def _generate(self, text: str, font_path: str, spec: StyleSpec | None) -> tuple[Image.Image, dict] | None:
+        """The re-draw loop shared by :meth:`generate_image` and :meth:`generate_styled`."""
         # Background and ink are re-drawn until the finished crop is readable along
         # its whole length: a dark band or busy patch of paper under part of the
         # word makes a label the image no longer supports. A second round re-rolls
@@ -124,20 +139,48 @@ class TextImageGenerator:
         min_contrast = self.config.realism.min_local_contrast
         for _ in range(2 if min_contrast > 0 else 1):
             font_size, bold_width, outline_width = self.text_renderer.sample_style()
+            if spec is not None:  # the face's own weight is the label: no stroke tricks
+                bold_width = outline_width = 0
             # Render the glyph once as a black coverage map (single getbbox/draw).
             coverage = None
             for _ in range(self.config.core.max_attempts):
-                candidate = self.text_renderer.render_coverage(text, font_path, font_size, bold_width)
+                candidate = self.text_renderer.render_coverage(
+                    text,
+                    font_path,
+                    font_size,
+                    bold_width,
+                    weight=spec.weight if spec else None,
+                    decorations=spec.decorations if spec else None,
+                )
                 if self.is_text_visible(candidate):
                     coverage = candidate
                     break
             if coverage is None:
                 continue
             for _ in range(max(1, self.config.core.max_attempts)):
-                image, alpha = self._compose(text, font_path, font_size, coverage, outline_width, bold_width)
+                image, alpha = self._compose(text, font_path, font_size, coverage, outline_width, bold_width, spec)
                 if min_contrast <= 0 or local_ink_contrast(image, alpha) >= min_contrast:
-                    return image
+                    return image, (self._measure_ink(image, alpha, self._last_ink) if spec is not None else {})
         return None
+
+    @staticmethod
+    def _measure_ink(image: Image.Image, alpha: Image.Image, ink_drawn: tuple[int, ...]) -> dict:
+        """The ink colour a reader names, judged against the paper around the word.
+
+        A crop that went through a grayscale or black-and-white scan has lost its
+        colour, so it is named from its pixels. Otherwise the ink that was drawn is
+        named: faded ink over a yellow marker *measures* olive but reads as black.
+        """
+        arr = np.asarray(image.convert("RGB"), dtype=np.float32)
+        a = np.asarray(alpha, dtype=np.uint8)
+        core = a > 200 if (a > 200).sum() >= 12 else a > 100
+        paper = a == 0
+        if not core.any() or not paper.any():
+            return {"color": color_name(np.asarray(ink_drawn, np.float32), np.full(3, 255.0))}
+        bg = np.median(arr[paper], axis=0)
+        gray = float(np.abs(arr[core] - arr[core].mean(axis=1, keepdims=True)).max()) < 3.0
+        ink = np.median(arr[core], axis=0) if gray else np.asarray(ink_drawn, np.float32)
+        return {"color": color_name(ink, bg)}
 
     def _margins(self, text_height: int) -> tuple[int, int, int, int]:
         """Extra (left, top, right, bottom) margin, like an expanded detector box."""
@@ -191,7 +234,14 @@ class TextImageGenerator:
         return layer if placed else None
 
     def _compose(
-        self, text: str, font_path: str, font_size: int, coverage: Image.Image, outline_width: int, bold_width: int
+        self,
+        text: str,
+        font_path: str,
+        font_size: int,
+        coverage: Image.Image,
+        outline_width: int,
+        bold_width: int,
+        spec: StyleSpec | None = None,
     ) -> tuple[Image.Image, Image.Image]:
         """Background + ink (+ page context) + final degradations for one rendered glyph map."""
         left, top, right, bottom = self._margins(coverage.height)
@@ -200,7 +250,21 @@ class TextImageGenerator:
         # Calm the texture *before* choosing ink, so the decision is made against
         # the background the glyph will actually sit on.
         bg_crop = calm_texture(bg_crop, self.config.realism.crop_texture_std)
-        style = self._decide_style(bg_crop, bold_width, outline_width)
+        if spec is not None and spec.highlight is not None and (ink_box := coverage.getchannel("A").getbbox()):
+            # A marker only shows on light paper (and then takes dark ink): lift a dark crop first.
+            arr = np.asarray(bg_crop, dtype=np.float32)
+            if arr.mean() < 170:
+                arr = 200 + (arr - arr.mean()) * 0.3
+                bg_crop = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+            x0, y0, x1, y1 = ink_box
+            bg_crop = paint_highlight(bg_crop, (left + x0, top + y0, left + x1, top + y1), spec.highlight)
+        if spec is not None:
+            style = decide_text_style(
+                self.config, bg_crop, bold_width, outline_width, ink_hue=spec.ink_hue, neutral=spec.neutral
+            )
+            self._last_ink = style.fill_color
+        else:
+            style = self._decide_style(bg_crop, bold_width, outline_width)
 
         if outline_width > 0 and style.outline_color is not None:
             # Rarer two-tone path: re-render with the styled fill + outline.
@@ -215,7 +279,7 @@ class TextImageGenerator:
         word = Image.new("RGBA", size, (0, 0, 0, 0))
         word.paste(glyph, (left, top))
         canvas = bg_crop.convert("RGBA")
-        if random.random() < self.config.recognition.context_prob:
+        if spec is None and random.random() < self.config.recognition.context_prob:
             context = self._context(
                 size, (left, top, left + glyph.width, top + glyph.height), text, font_path, font_size, style
             )

@@ -26,7 +26,7 @@ def test_font_cache_reuse(tiny_font):
     f1 = r._get_font(tiny_font, 30)
     f2 = r._get_font(tiny_font, 30)
     assert f1 is f2  # cached, not re-created
-    assert (tiny_font, 30) in r._font_cache
+    assert (tiny_font, 30, None) in r._font_cache  # (path, size, weight of a variable face)
 
 
 def test_font_cache_eviction(tiny_font):

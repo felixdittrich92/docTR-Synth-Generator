@@ -16,6 +16,7 @@ import colorsys
 import functools
 import random
 import re
+import struct
 from dataclasses import dataclass
 
 import numpy as np
@@ -139,6 +140,18 @@ def _standard_weight(value: int) -> int:
     return max(100, min(900, int(round(value / 100.0)) * 100))
 
 
+def _post_header(font: TTFont) -> tuple[float, int, int] | None:
+    """``italicAngle``, ``underlinePosition`` and ``underlineThickness`` of the ``post`` table, read from its
+    header: decompiling the table builds the glyph names too, which takes seconds for some CJK fonts."""
+    if "post" not in font.reader:
+        return None
+    data = font.reader["post"]
+    if len(data) < 12:
+        return None
+    angle, position, thickness = struct.unpack(">ihh", data[4:12])
+    return angle / 65536.0, position, thickness
+
+
 @functools.lru_cache(maxsize=4096)
 def font_traits(path: str) -> FontTraits:
     """Family, weight, italic and line metrics of a font file (cached per path)."""
@@ -147,11 +160,13 @@ def font_traits(path: str) -> FontTraits:
     while (stripped := _STYLE_WORDS.sub("", family)) != family:
         family = stripped  # "Noto Sans Medium Italic" -> "Noto Sans"
     os2 = font["OS/2"] if "OS/2" in font else None
-    post = font["post"] if "post" in font else None
+    post = _post_header(font)
     upem = int(font["head"].unitsPerEm) if "head" in font else 1000
     italic = bool(
         (os2 is not None and os2.fsSelection & 1)
-        or (post is not None and abs(float(post.italicAngle)) > 0.5)
+        # A right-leaning face whose italic bit is not set (e.g. slanted scripts); a positive (backslant) angle on
+        # an upright Regular is broken metadata (Roman Unicode: +17 degrees)
+        or (post is not None and post[0] < -0.5)
         or re.search(r"italic|oblique", path.rsplit("/", 1)[-1], re.IGNORECASE)
     )
     weight = _named_weight(font) or _standard_weight(int(os2.usWeightClass) if os2 is not None else 400)
@@ -161,7 +176,7 @@ def font_traits(path: str) -> FontTraits:
             if axis.axisTag == "wght":
                 weight_range = (int(axis.minValue), int(axis.maxValue))
                 weight = int(axis.defaultValue)
-    underline = (int(post.underlinePosition), int(post.underlineThickness)) if post is not None else (0, 0)
+    underline = (post[1], post[2]) if post is not None else (0, 0)
     if underline[1] <= 0:  # missing metrics: what word processors fall back to
         underline = (-upem // 10, max(1, upem // 20))
     strikeout = (int(os2.yStrikeoutPosition), int(os2.yStrikeoutSize)) if os2 is not None else (0, 0)

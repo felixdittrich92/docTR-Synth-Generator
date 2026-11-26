@@ -33,7 +33,13 @@ The labels are ground truth by construction:
 * **multilingual**: a family only renders languages whose letters it inks and
   (for complex scripts) shapes; every text is HarfBuzz-checked in its exact face.
 * **one class per design**: a family whose letters for a script are a copy of another
-  family's (Heebo's Latin is Roboto's) does not render that script.
+  family's (Heebo's Latin is Roboto's) does not render that script, nor do the faces made
+  for another script whose Latin reads as a document font (the Times-like Latin of
+  Scheherazade New); widths, optical sizes and versions of one family (Fira Sans
+  Condensed, Playfair Display) and the clones of Times, Helvetica and Lato are one class.
+* **handwritten** is what a hand wrote: handwriting faces drawn with the variation of a
+  pen, while script typefaces set as type (a logo, a certificate) are printed; crops carry
+  the cut-off neighbouring lines of a dense page, as docTR's expanded boxes do.
 * **document fonts**: the faces most pages are set in - Times, Helvetica, Courier,
   Cambria, Computer Modern, ... as free metric-compatible clones (:data:`generator.recipes.fonts.DOC_FONTS`).
 
@@ -68,7 +74,6 @@ from ..components.font_styles import (
     weight_name,
 )
 from ..components.generator import TextImageGenerator
-from ..components.vocabs import VOCABS
 from ..dataset_generator import SyntheticDatasetGenerator
 from .corpus import Corpus, http_get
 from .detection import clean_pool, enrich, page_weights
@@ -81,7 +86,7 @@ from .fonts import (
     scan_fonts,
     write_font_dir,
 )
-from .languages import LANGUAGES, primary_script, resolve_languages, script_of
+from .languages import lang_chars, primary_script, resolve_languages, script_of
 from .render import Progress, Worker, atomic_write_json, make_pool, render_part
 from .text import numeric_tokens
 
@@ -130,9 +135,23 @@ DOC_FONT_WEIGHT = 3
 # Faces Google Fonts files under handwriting that are typeset in practice (Comic Neue is a
 # Comic Sans) or neat print (textbook and KaiTi faces): printed text, not handwriting.
 PRINTED_LOOKALIKES = {"Comic Neue", "Itim", "Mali", "Klee One", "LXGW WenKai TC"}
+# Handwriting faces as regular as type (Playpen Sans, Pangolin and Short Stack read as rounded
+# sans): neither clearly handwritten nor printed, they are left out rather than teach either label.
+AMBIGUOUS_HANDS = ("Playpen Sans", "Pangolin", "Short Stack")
+# Script and brush typefaces that print is set in too (logos, signs, invitations, certificates):
+# "handwritten" is what a hand wrote, so a share of their crops are clean type and printed, the
+# others written (always with the variation of a hand). Otherwise every printed script reads as handwriting.
+TYPESET_HANDS = frozenset({
+    "Allura", "Charm", "Charmonman", "Cookie", "Dancing Script", "Great Vibes", "Sacramento", "Satisfy",
+    "Yellowtail", "Mr Dafoe", "Rancho", "Sriracha", "Amatic SC", "Permanent Marker",
+})  # fmt: skip
+TYPESET_PRINTED_PROB = 0.5
 # Share of the handwritten crops drawn with the variation of a hand (:func:`hand_warp`),
 # and of the printed crops slightly warped (a curved page): a wobble alone is not handwriting.
 HAND_PROB, PRINTED_WARP_PROB = 0.8, 0.08
+# Share of the crops whose margins carry the cut-off neighbouring lines, as a docTR crop of a dense
+# page does (its box is expanded): without them, such strokes at the crop edge read as handwriting.
+CONTEXT_PROB = 0.4
 # Words in capitals: block capitals are common in handwriting (forms, signs, markers).
 UPPER_PROB = {True: 0.25, False: 0.06}
 # Ballpoint blue is the most common coloured ink of handwriting.
@@ -168,8 +187,49 @@ KNOWN_CATEGORIES = {
     **dict.fromkeys(("TeX Gyre Heros", "Latin Modern Sans", "Arial", "BPG Arial", "Aksaramatee", "Rounded Mplus 1c",
                      "TH Sarabun New", "lipipragatuchhi"), "SANS_SERIF"),
     **dict.fromkeys(("TeX Gyre Cursor", "Latin Modern Mono"), "MONOSPACE"),
-    "Nanum Pen": "HANDWRITING",
+    "Nanum Pen": "HANDWRITING", "Shadows Into": "HANDWRITING",
 }  # fmt: skip
+# Text faces made for another script whose Latin readers take for a document font's: the Latin
+# of Scheherazade New, Amiri and Markazi Text (Arabic), Asar (Devanagari) and Tiro Tamil is
+# Times-like, that of Meera Inimai (Tamil), Yantramanav, Akshar, Padauk and lipipragatuchhi
+# Roboto-like, BPG Arial (Georgian), Almarai (Arabic) and Ramabhadra (Telugu) are Arial-like,
+# Noto Sans Hebrew is Noto Sans. On real pages these classes took most of the Times, Roboto and
+# Arial words, so they render their own script only. (Their alphabets are not copies, which
+# :func:`_borrowed` drops by itself; and a rule for every face made for another script took the
+# Latin of 199 families, and with it most of the printed Latin variety.)
+LATIN_LOOKALIKES = frozenset({
+    "Scheherazade New", "Amiri", "Markazi Text", "Asar", "Tiro Tamil", "Meera Inimai", "Yantramanav", "Akshar",
+    "Padauk", "lipipragatuchhi", "BPG Arial", "Almarai", "Ramabhadra", "Noto Sans Hebrew",
+})  # fmt: skip
+ALPHABETS = frozenset({"LATIN", "CYRILLIC", "GREEK"})
+# ... and every serif text face made for another script: their Latin is a generic, mostly Times-like
+# serif (Aparajita draws Times 20% smaller, too far apart in size for :func:`_borrowed`), and the
+# next one took the Times words of real pages whenever one was removed. The sans faces keep theirs
+# (many are designs of their own: Poppins, Kanit, Cairo), but for the look-alikes above.
+# Script of a family: Google Fonts ``primary_script`` (ISO 15924), else these.
+NATIVE_SCRIPTS = {
+    "Aparajita": "Deva", "Lohit Marathi": "Deva", "lipipragatuchhi": "Orya", "Javanese Text": "Java",
+    "Song Myung": "Kore", "Nanum Pen": "Kore", "TH Sarabun New": "Thai", "Aksaramatee": "Thai", "BPG Arial": "Geor",
+    "Rounded Mplus 1c": "Jpan", "站酷小薇体": "Hans",
+}  # fmt: skip
+_ALPHABET_CODES = frozenset({"Latn", "Cyrl", "Grek"})
+# One class per design: the widths, optical sizes and versions of a family (keeper: members)
+SIBLINGS: dict[str, tuple[str, ...]] = {
+    "Fira Sans": ("Fira Sans Condensed", "Fira Sans Extra Condensed"),
+    "IBM Plex Sans": ("IBM Plex Sans Condensed",),
+    "Noto Serif Armenian": ("Noto Serif Armenian Condensed", "Noto Serif Armenian SemiCondensed",
+                            "Noto Serif Armenian ExtraCondensed"),
+    "Playfair": ("Playfair Display",), "Bellota": ("Bellota Text",), "Yaldevi": ("Yaldevi Colombo",),
+    "Cormorant Garamond": ("Cormorant Infant",), "Winky Sans": ("Winky Rough",),
+}  # fmt: skip
+# ... and the metric-compatible clones of Times and Helvetica, for the alphabets they share
+# (Arial keeps its Arabic): on a page, nobody can tell Tinos from TeX Gyre Termes. Carlito (for
+# Calibri) is drawn from Lato's letters.
+CLONES: dict[str, tuple[str, ...]] = {
+    "Tinos": ("TeX Gyre Termes", "Roman Unicode"),
+    "Arimo": ("Arial", "TeX Gyre Heros"),
+    "Lato": ("Carlito",),
+}
 
 
 # =============================================================================
@@ -214,35 +274,89 @@ def is_handwritten(family: str, category: str) -> bool:
     return category == "HANDWRITING" and family not in PRINTED_LOOKALIKES
 
 
-def _category(family: str, cache_file: Path, offline: bool) -> str:
-    """Google Fonts category of ``family`` (``METADATA.pb``), cached; a name heuristic otherwise."""
+def _gf_metadata(family: str, cache_file: Path, offline: bool) -> dict[str, str | None]:
+    """Google Fonts ``category`` and ``primary_script`` of ``family`` (``METADATA.pb``), cached.
+
+    Both are None outside Google Fonts; offline, a family missing from the cache is not cached.
+    """
     cache = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
-    if family not in cache:
-        found = None
-        if not offline:
-            slug = "".join(c for c in family.lower() if c.isalnum())
-            for licence in ("ofl", "apache", "ufl"):
-                data = http_get(f"https://raw.githubusercontent.com/google/fonts/main/{licence}/{slug}/METADATA.pb", 30)
-                if data:
-                    for line in data.decode("utf-8", "replace").splitlines():
-                        if line.startswith("category:"):
-                            found = line.split('"')[1] if '"' in line else None
-                            break
-                    break
-        if found is None:
-            low = family.lower()
-            found = (
-                "MONOSPACE"
-                if "mono" in low
-                else "SERIF"
-                if "serif" in low and "sans" not in low
-                else "SANS_SERIF"
-                if "sans" in low
-                else "UNKNOWN"
-            )
-        cache[family] = found if found in CATEGORIES else "UNKNOWN"
-        atomic_write_json(cache_file, cache, indent=0)
-    return cache[family]
+    if family in cache:
+        return cache[family]
+    found: dict[str, str | None] = {"category": None, "primary_script": None}
+    if offline:
+        return found
+    slug = "".join(c for c in family.lower() if c.isalnum())
+    for licence in ("ofl", "apache", "ufl"):
+        data = http_get(f"https://raw.githubusercontent.com/google/fonts/main/{licence}/{slug}/METADATA.pb", 30)
+        if data:
+            for line in data.decode("utf-8", "replace").splitlines():
+                key, _, value = line.partition(":")
+                if key in found and '"' in value:
+                    found[key] = value.split('"')[1]
+            break
+    cache[family] = found
+    atomic_write_json(cache_file, cache, indent=0)
+    return found
+
+
+def _category(family: str, metadata: dict[str, str | None]) -> str:
+    """Google Fonts category of ``family``; a name heuristic outside Google Fonts."""
+    if metadata.get("category") in CATEGORIES:
+        return str(metadata["category"])
+    low = family.lower()
+    if "mono" in low:
+        return "MONOSPACE"
+    if "serif" in low and "sans" not in low:
+        return "SERIF"
+    return "SANS_SERIF" if "sans" in low else "UNKNOWN"
+
+
+def _foreign_alphabets(
+    families: dict[str, dict], categories: dict[str, str], scripts: dict[str, str | None]
+) -> dict[str, set[str]]:
+    """Languages each family must not render: the alphabets (:data:`ALPHABETS`) of :data:`LATIN_LOOKALIKES` and of
+    the serif text faces made for another script (``scripts``: ISO 15924 code of each family, None if unknown)."""
+    drop = {}
+    serifs = {n for n in families if categories.get(n) == "SERIF" and scripts.get(n) not in (None, *_ALPHABET_CODES)}
+    for name in (LATIN_LOOKALIKES & set(families)) | serifs:
+        lost = {lang for lang in families[name]["languages"] if primary_script(lang) in ALPHABETS}
+        if lost:
+            drop[name] = lost
+    return drop
+
+
+def _merge_designs(
+    families: dict[str, dict], groups: dict[str, tuple[str, ...]], scripts: frozenset[str] | None = None
+) -> None:
+    """Merge each group into its keeper (in place): the members' languages of ``scripts`` (all
+    by default) and their faces move to the keeper; a member left without languages disappears
+    later. Each face keeps its own languages, so a class never renders a text its face lacks."""
+    for keeper, members in groups.items():
+        if keeper not in families:
+            continue
+        target = families[keeper]
+        for name in members:
+            fam = families.get(name)
+            if fam is None:
+                continue
+            moved = {lang for lang in fam["languages"] if scripts is None or primary_script(lang) in scripts}
+            if moved:
+                target["languages"] |= moved
+                target["variants"].update(fam["variants"])
+                fam["languages"] -= moved
+
+
+def _family_weights(families: set[str], doc_families: set[str]) -> dict[str, int]:
+    """Turns per sampling round of each class: :data:`DOC_FONT_WEIGHT` for a document font, 1 for the others,
+    summed over the faces merged into a class (:data:`SIBLINGS`, :data:`CLONES`). A merge then keeps the share
+    of the data its faces had: Times (Tinos, TeX Gyre Termes and Roman Unicode) is drawn 7 times per round,
+    and with it the regular Times words that keep a classifier from calling them bold."""
+
+    def weight(name: str) -> int:
+        return DOC_FONT_WEIGHT if name in doc_families else 1
+
+    groups = {k: members for g in (SIBLINGS, CLONES) for k, members in g.items()}
+    return {name: weight(name) + sum(weight(m) for m in groups.get(name, ())) for name in families}
 
 
 def _merge_duplicates(families: dict[str, dict]) -> dict[str, dict]:
@@ -442,7 +556,7 @@ def _plan(
         fam = families[family]
         variant = rng.choice([v for v in fam["variants"] if fits(v)])
         weight = _pick_weight(variant, want_bold if bold is None else bold, rng)
-        langs = fam["languages"]
+        langs = variant.get("languages") or fam["languages"]  # the languages this face renders
         lang = rng.choices(langs, weights=[lang_weights.get(lg, 1e-3) for lg in langs])[0]
         rows.append((family, variant["file"], weight, lang, rng.getrandbits(31)))
     return rows
@@ -485,31 +599,51 @@ def prepare(args) -> None:
             traits = font_traits(str(meta / "fonts" / name))
             fam = families.setdefault(traits.family, {"variants": {}, "languages": set()})
             fam["languages"].add(lang)
-            fam["variants"][name] = {
+            variant = fam["variants"].setdefault(name, {
                 "file": name,
                 "italic": traits.italic,
                 "weight": traits.weight,
                 "weight_range": list(traits.weight_range) if traits.weight_range else None,
-            }
+                "languages": set(),
+            })  # fmt: skip
+            variant["languages"].add(lang)
     families = _merge_duplicates(families)
+    families = {k: v for k, v in families.items() if not k.startswith(AMBIGUOUS_HANDS)}
+    gf = {name: _gf_metadata(name, cache / "gf_metadata.json", args.offline) for name in families}
+    categories = {name: KNOWN_CATEGORIES.get(name) or _category(name, gf[name]) for name in families}
+    scripts = {name: NATIVE_SCRIPTS.get(name) or gf[name].get("primary_script") for name in families}
+    foreign = _foreign_alphabets(families, categories, scripts)
+    for name, lost in foreign.items():
+        families[name]["languages"] -= lost
+    print(f"  Latin look-alikes and serifs made for another script: {len(foreign)} families drop their Latin, "
+          f"Cyrillic and Greek ({', '.join(sorted(foreign))})")  # fmt: skip
     borrowed = _borrowed(families, meta / "fonts", _probes(langs, pools))
     for name, lost in borrowed.items():
         families[name]["languages"] -= lost
     by_script = Counter(primary_script(lg) for lost in borrowed.values() for lg in lost)
     print(f"  copied letters: {len(borrowed)} families drop languages whose letters are another family's "
-          f"({', '.join(f'{k.lower()} {v}' for k, v in by_script.most_common(8))})")  # fmt: skip
+          f"({', '.join(f'{k.lower()} {v}' for k, v in by_script.most_common(8))}): "
+          f"{', '.join(sorted(borrowed))}")  # fmt: skip
+    _merge_designs(families, SIBLINGS)
+    _merge_designs(families, CLONES, ALPHABETS)
     families = {k: v for k, v in families.items() if v["languages"] and v["variants"]}
     for name, fam in families.items():
-        fam["languages"] = sorted(fam["languages"])
-        fam["variants"] = sorted(fam["variants"].values(), key=lambda v: v["file"])
-        fam["category"] = KNOWN_CATEGORIES.get(name) or _category(name, cache / "gf_categories.json", args.offline)
+        langs_of = fam["languages"]
+        fam["languages"] = sorted(langs_of)
+        fam["variants"] = [
+            {**v, "languages": sorted(v["languages"] & langs_of)}
+            for v in sorted(fam["variants"].values(), key=lambda v: v["file"])
+            if v["languages"] & langs_of
+        ]
+        fam["category"] = categories[name]
         fam["handwritten"] = is_handwritten(name, fam["category"])
+        fam["typeset"] = fam["handwritten"] and name in TYPESET_HANDS  # written or set as type (printed)
 
     print("Texts ...")
     for lang in langs:
         if not by_lang.get(lang):
             continue
-        target = {c for c in VOCABS[LANGUAGES[lang][0]] if not c.isspace() and selector.candidates(c, lang)}
+        target = {c for c in lang_chars(lang) if not c.isspace() and selector.candidates(c, lang)}
         words = enrich(lang, [w for w in pools[lang] if selector.candidates(w, lang)], target, rng)
         words += numeric_tokens(lang, 600, target | set("0123456789"), rng, 0.35)
         train = [w for w in words if not _held_out(w)]
@@ -537,9 +671,8 @@ def prepare(args) -> None:
         },
         indent=1,
     )
-    doc_families = {font_traits(str(p)).family for p in doc_paths} & set(families)
-    print(f"  document fonts: {', '.join(sorted(doc_families))} (x{DOC_FONT_WEIGHT})")
-    weights = dict.fromkeys(doc_families, DOC_FONT_WEIGHT)
+    weights = _family_weights(set(families), {font_traits(str(p)).family for p in doc_paths})
+    print(f"  sampling weights: {', '.join(f'{k} x{v}' for k, v in sorted(weights.items()) if v > 1)}")
     for split, n in (("train", args.num_train), ("val", args.num_val)):
         rows = _plan(n, families, lang_weights, random.Random(SEED + (split == "val")), weights)
         lines = ["\t".join(map(str, r)) for r in rows]
@@ -582,6 +715,7 @@ def _config(args) -> GenerationConfig:
         # a ruled line on the paper spans the crop - without a margin they look the same.
         margin_prob=1.0,
         margin_range=(0.06, 0.3),
+        context_prob=CONTEXT_PROB,  # the neighbouring lines only: no rules (see generate_styled)
     )
 
 
@@ -622,7 +756,7 @@ class StyleWorker(Worker):
         return ""
 
     @staticmethod
-    def _spec(weight: int | None, rng: random.Random, handwritten: bool = False) -> StyleSpec:
+    def _spec(weight: int | None, rng: random.Random, handwritten: bool = False, written: bool = False) -> StyleSpec:
         underline = rng.choices(list(UNDERLINE_PRIOR), weights=list(UNDERLINE_PRIOR.values()))[0]
         highlight = rng.choice(list(HIGHLIGHT_COLORS)) if rng.random() < HIGHLIGHT_PROB else None
         colored = rng.random() < COLORED_PROB
@@ -630,7 +764,7 @@ class StyleWorker(Worker):
         if handwritten and rng.random() < HANDWRITTEN_BLUE_PROB:
             colored, hue = True, INK_HUES["blue"]
         if handwritten:
-            hand = rng.uniform(0.4, 1.0) if rng.random() < HAND_PROB else 0.0
+            hand = rng.uniform(0.4, 1.0) if written or rng.random() < HAND_PROB else 0.0
         else:
             hand = rng.uniform(0.15, 0.35) if rng.random() < PRINTED_WARP_PROB else 0.0
         return StyleSpec(
@@ -651,6 +785,8 @@ class StyleWorker(Worker):
         font_path = str(self.font_dir / file)
         chars = self.chars[file]
         handwritten = bool(self.families[family].get("handwritten", False))
+        typeset = self.families[family].get("typeset", False) and rng.random() < TYPESET_PRINTED_PROB
+        handwritten = handwritten and not typeset  # a script set as type (a logo, a certificate) is printed
         upper = rng.random() < UPPER_PROB[handwritten]
         for _ in range(30):  # a text this exact face inks and shapes cleanly
             text = self._text(lang, split, rng)
@@ -662,7 +798,8 @@ class StyleWorker(Worker):
             return None
         traits = font_traits(font_path)
         weight = int(weight) if traits.weight_range else traits.weight
-        spec = self._spec(weight if traits.weight_range else None, rng, handwritten)
+        written = handwritten and self.families[family].get("typeset", False)  # written: always by a hand
+        spec = self._spec(weight if traits.weight_range else None, rng, handwritten, written)
         result = self.gen.generate_styled(text, font_path, spec)
         if result is None:
             return None

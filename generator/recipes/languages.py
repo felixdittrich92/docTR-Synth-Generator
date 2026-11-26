@@ -19,6 +19,8 @@ __all__ = [
     "letter_scripts",
     "primary_script",
     "allowed_scripts",
+    "SHARED_SIGNS",
+    "lang_chars",
     "punct_style",
     "PUNCT",
     "COMPLEX_SCRIPT_TAGS",
@@ -136,6 +138,17 @@ def primary_script(lang: str) -> str:
     """The script most of the language's vocab letters belong to."""
     counts = Counter(script_of(c) for c in VOCABS[LANGUAGES[lang][0]] if c.isalpha())
     return counts.most_common(1)[0][0]
+
+
+# Signs every script shares (m², H₂O, ½, ±, „quotes“, «guillemets», ©, §): docTR's ``additional_signs``,
+# part of its multilingual vocab. They are not letters: no face has to draw them to serve a language.
+SHARED_SIGNS = VOCABS["additional_signs"]
+
+
+@cache
+def lang_chars(lang: str) -> str:
+    """The characters a text of ``lang`` may contain: its docTR vocab and the shared signs."""
+    return "".join(dict.fromkeys(VOCABS[LANGUAGES[lang][0]] + SHARED_SIGNS))
 
 
 def allowed_scripts(lang: str) -> set[str]:

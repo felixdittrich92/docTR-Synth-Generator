@@ -127,11 +127,16 @@ def is_ambiguous(word: str, script: str) -> bool:
 
 def digit_system(c: str) -> str | None:
     """The numbering system of a character: ``"ASCII"``, a decimal run (identified by
-    its zero: ٠ ۰ ० ๐ ...) or a script's own numerals (Ethiopic ፩፪፫); ``None`` otherwise."""
+    its zero: ٠ ۰ ० ๐ ...) or a script's own numerals (Ethiopic ፩፪፫); ``None`` otherwise.
+
+    Superscripts, subscripts and fractions belong to no system: they are written next to any
+    digits (10², H₂O, 1½)."""
     if not unicodedata.category(c).startswith("N"):
         return None
     if c.isascii():
         return "ASCII"
+    if unicodedata.name(c, "").startswith(("SUPERSCRIPT", "SUBSCRIPT", "VULGAR FRACTION")):
+        return None
     if unicodedata.category(c) == "Nd":
         return chr(ord(c) - unicodedata.digit(c))
     return unicodedata.name(c, "?").split(" ", 1)[0]
@@ -317,6 +322,90 @@ _SYMBOL_TEMPLATES: dict[str, list] = {
     "/": [lambda w, r: f"{_num(r)}/{_num(r)}", lambda w, r: f"{w}/{w[:4]}", lambda w, r: "km/h"],
     "%": [lambda w, r: f"{_num(r, 1, 3)}%", lambda w, r: f"{_num(r, 1, 2)},{_num(r, 1, 1)}%"],
 }
+
+
+def _year(rng: random.Random) -> str:
+    return str(rng.randint(1950, 2026))
+
+
+def _quotes(char: str, *pairs: tuple[str, str]) -> list:
+    """A word between each pair of quotes holding ``char``, or the phrase start / end it marks."""
+    out: list = []
+    for left, right in pairs:
+        out.append(lambda w, r, a=left, b=right: f"{a}{w}{b}")
+        if char == left:
+            out.append(lambda w, r, a=left: f"{a}{w}")
+        if char == right:
+            out.append(lambda w, r, b=right: f"{w}{b}")
+    return out
+
+
+# The shared signs (``SHARED_SIGNS``): superscripts and subscripts on numbers, units and formulas,
+# fractions after a number, operators between numbers, quotes around words, marks after names.
+_SUPERSCRIPT_DIGITS, _SUBSCRIPT_DIGITS = "⁰¹²³⁴⁵⁶⁷⁸⁹", "₀₁₂₃₄₅₆₇₈₉"
+for _c in _SUPERSCRIPT_DIGITS:
+    _SYMBOL_TEMPLATES[_c] = [
+        lambda w, r, c=_c: f"{_num(r, 1, 3)}{c}",
+        lambda w, r, c=_c: f"{r.choice(['m', 'cm', 'km', 'x', 'n'])}{c}",
+        lambda w, r, c=_c: f"10{c}",
+        lambda w, r, c=_c: f"{w}{c}",  # a footnote
+    ]
+for _c in _SUBSCRIPT_DIGITS:
+    _SYMBOL_TEMPLATES[_c] = [
+        lambda w, r, c=_c: f"H{c}O",
+        lambda w, r, c=_c: f"CO{c}",
+        lambda w, r, c=_c: f"x{c}",
+        lambda w, r, c=_c: f"{w}{c}",
+    ]
+for _c, _builders in {
+    "⁺": [lambda w, r: "Ca²⁺", lambda w, r: f"{w}⁺", lambda w, r: f"{_num(r, 1, 1)}⁺"],
+    "⁻": [lambda w, r: f"10⁻{r.choice(_SUPERSCRIPT_DIGITS[1:])}", lambda w, r: f"{w}⁻", lambda w, r: "OH⁻"],
+    "⁼": [lambda w, r: f"x⁼{_num(r, 1, 1)}", lambda w, r: f"{w}⁼"],
+    "⁽": [lambda w, r: f"x⁽{r.choice(_SUPERSCRIPT_DIGITS)}⁾", lambda w, r: f"⁽{w}"],
+    "⁾": [lambda w, r: f"x⁽{r.choice(_SUPERSCRIPT_DIGITS)}⁾", lambda w, r: f"{w}⁾"],
+    "₊": [lambda w, r: f"x₊{r.choice(_SUBSCRIPT_DIGITS)}", lambda w, r: f"{w}₊"],
+    "₋": [lambda w, r: f"x₋{r.choice(_SUBSCRIPT_DIGITS)}", lambda w, r: f"{w}₋"],
+    "₌": [lambda w, r: f"x₌{r.choice(_SUBSCRIPT_DIGITS)}", lambda w, r: f"{w}₌"],
+    "₍": [lambda w, r: f"x₍{r.choice(_SUBSCRIPT_DIGITS)}₎", lambda w, r: f"₍{w}"],
+    "₎": [lambda w, r: f"x₍{r.choice(_SUBSCRIPT_DIGITS)}₎", lambda w, r: f"{w}₎"],
+    "±": [lambda w, r: f"±{_num(r, 1, 2)}", lambda w, r: f"{_num(r, 1, 3)}±{_num(r, 1, 2)}", lambda w, r: "±"],
+    "×": [lambda w, r: f"{_num(r, 1, 3)}×{_num(r, 1, 3)}", lambda w, r: f"×{_num(r, 1, 2)}", lambda w, r: "×"],
+    "÷": [lambda w, r: f"{_num(r, 1, 3)}÷{_num(r, 1, 2)}", lambda w, r: "÷"],
+    "≈": [lambda w, r: f"≈{_num(r, 1, 3)}", lambda w, r: "≈", lambda w, r: f"{_num(r, 1, 2)}≈{_num(r, 1, 2)}"],
+    "≠": [lambda w, r: f"x≠{_num(r, 1, 2)}", lambda w, r: "≠", lambda w, r: f"{_num(r, 1, 2)}≠{_num(r, 1, 2)}"],
+    "≤": [lambda w, r: f"≤{_num(r, 1, 3)}", lambda w, r: "≤", lambda w, r: f"x≤{_num(r, 1, 2)}"],
+    "≥": [lambda w, r: f"≥{_num(r, 1, 3)}", lambda w, r: "≥", lambda w, r: f"x≥{_num(r, 1, 2)}"],
+    "∞": [lambda w, r: "∞", lambda w, r: "+∞", lambda w, r: f"{w}∞"],
+    "√": [lambda w, r: f"√{_num(r, 1, 3)}", lambda w, r: "√", lambda w, r: f"√{w}"],
+    "‰": [lambda w, r: f"{_num(r, 1, 2)}‰", lambda w, r: f"{_num(r, 1, 2)},{_num(r, 1, 1)}‰"],
+    "–": [lambda w, r: f"{_num(r, 1, 4)}–{_num(r, 1, 4)}", lambda w, r: "–", lambda w, r: f"{w}–"],
+    "—": [lambda w, r: "—", lambda w, r: f"{w}—", lambda w, r: f"—{w}"],
+    "…": [lambda w, r: f"{w}…", lambda w, r: "…", lambda w, r: f"…{w}"],
+    "•": [lambda w, r: "•", lambda w, r: f"•{w}"],
+    "„": _quotes("„", ("„", "“")),
+    "‚": _quotes("‚", ("‚", "‘")),
+    "“": _quotes("“", ("„", "“"), ("“", "”")),
+    "”": _quotes("”", ("“", "”")),
+    "‘": _quotes("‘", ("‚", "‘"), ("‘", "’")),
+    "’": _quotes("’", ("‘", "’")) + [lambda w, r: f"{w}’s", lambda w, r: f"l’{w}"],
+    "«": _quotes("«", ("«", "»"), ("»", "«")),
+    "»": _quotes("»", ("«", "»"), ("»", "«")),
+    "‹": _quotes("‹", ("‹", "›"), ("›", "‹")),
+    "›": _quotes("›", ("‹", "›"), ("›", "‹")),
+    "©": [lambda w, r: f"©{_year(r)}", lambda w, r: f"©{w}", lambda w, r: "©"],
+    "®": [lambda w, r: f"{w}®", lambda w, r: "®"],
+    "™": [lambda w, r: f"{w}™", lambda w, r: "™"],
+    "№": [lambda w, r: f"№{_num(r, 1, 4)}", lambda w, r: "№"],
+    "†": [lambda w, r: f"†{_year(r)}", lambda w, r: f"{w}†", lambda w, r: "†"],
+    "‡": [lambda w, r: f"{w}‡", lambda w, r: "‡"],
+    "§": [lambda w, r: f"§{_num(r, 1, 3)}", lambda w, r: "§", lambda w, r: "§§"],
+    "¶": [lambda w, r: f"¶{_num(r, 1, 2)}", lambda w, r: "¶"],
+    "←": [lambda w, r: "←", lambda w, r: f"←{w}", lambda w, r: f"{w}←"],
+    "→": [lambda w, r: "→", lambda w, r: f"→{w}", lambda w, r: f"{w}→"],
+}.items():
+    _SYMBOL_TEMPLATES[_c] = _builders
+for _c in "¼½¾⅓⅔⅛⅜⅝⅞":
+    _SYMBOL_TEMPLATES[_c] = [lambda w, r, c=_c: f"{_num(r, 1, 2)}{c}", lambda w, r, c=_c: c]
 
 
 def symbol_token(char: str, word: str, rng: random.Random) -> str:

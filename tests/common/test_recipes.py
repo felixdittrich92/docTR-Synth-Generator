@@ -326,3 +326,19 @@ def test_legibility_is_measured_at_the_training_input_size():
     boxes = np.array([[[0, 0], [60, 0], [60, 10], [0, 10]]] * 50, dtype=np.float64)
     assert not legible_at_input_size(boxes, (2048, 2048), min_px=6.0, max_tiny=0.03)
     assert legible_at_input_size(boxes, (2048, 2048), min_px=6.0, max_tiny=0.03, input_size=1536)
+
+
+def test_shared_signs_reach_every_language():
+    import random
+
+    from generator.recipes.languages import SHARED_SIGNS, lang_chars
+    from generator.recipes.text import mixes_digit_systems, symbol_token
+
+    assert SHARED_SIGNS and all(c in lang_chars(lang) for lang in ("de", "ru", "ar", "th", "ja") for c in SHARED_SIGNS)
+    assert set(VOCABS["german"]) <= set(lang_chars("de"))  # on top of the language's own vocab
+    # Typographic numbers sit next to any digits: not a second digit system
+    assert not any(mixes_digit_systems(t) for t in ("10²", "1½", "H₂O", "Ca²⁺", "10⁻³"))
+    assert mixes_digit_systems("۰42")
+    rng = random.Random(0)
+    for c in SHARED_SIGNS:  # each sign is written the way documents write it, and carries it
+        assert all(c in symbol_token(c, "Wort", rng) for _ in range(20))

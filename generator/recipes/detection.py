@@ -47,11 +47,10 @@ from PIL import Image
 from ..components.config import GenerationConfig
 from ..components.page_generator import PageGenerator
 from ..components.vocab_coverage import augment_words_for_coverage
-from ..components.vocabs import VOCABS
 from ..dataset_generator import SyntheticDatasetGenerator
 from .corpus import THAI_MOJIBAKE, Corpus
 from .fonts import ManifestFontSelector, assign_fonts, collect_fonts, require_harfbuzz, scan_fonts, write_font_dir
-from .languages import LANGUAGES, allowed_scripts, letter_scripts, resolve_languages
+from .languages import LANGUAGES, allowed_scripts, lang_chars, letter_scripts, resolve_languages
 from .render import Progress, Worker, make_pool, render_part
 from .text import attach_punct, numeric_tokens, random_case, symbol_token
 
@@ -238,7 +237,7 @@ def prepare(args) -> None:
             print(f"  {lang:8s} no face qualifies - skipped")
             continue
         key = LANGUAGES[lang][0]
-        target = {c for c in VOCABS[key] if not c.isspace() and selector.candidates(c, lang)}
+        target = {c for c in lang_chars(lang) if not c.isspace() and selector.candidates(c, lang)}
         words = [w for w in pools[lang] if selector.candidates(w, lang)]
         counts = Counter(c for w in words for c in w)
         for c in sorted(target):  # punctuation and symbols in the contexts documents use
@@ -271,11 +270,11 @@ def prepare(args) -> None:
             "dropped_unrenderable": before - len(words),
             "fonts": len(by_lang[lang]),
             "font_files": by_lang[lang],
-            "vocab_chars_not_on_pages": "".join(c for c in VOCABS[key] if c not in seen and not c.isspace()),
+            "vocab_chars_not_on_pages": "".join(c for c in lang_chars(lang) if c not in seen and not c.isspace()),
             "vocab_chars_no_face": impossible.get(lang, ""),
             "cleaning": stats[lang],
         }
-        not_on_pages = "".join(c for c in VOCABS[key] if c not in seen and not c.isspace())
+        not_on_pages = "".join(c for c in lang_chars(lang) if c not in seen and not c.isspace())
         flag = f"  !! not on pages: {not_on_pages[:30]}" if not_on_pages else ""
         print(f"  {lang:8s} pool {len(words):6d}  fonts {len(by_lang[lang]):3d}  cov+{n_cov:<5d}{flag}")
 

@@ -125,8 +125,9 @@ class TextImageGenerator:
     def generate_styled(self, text: str, font_path: str, spec: StyleSpec) -> tuple[Image.Image, dict] | None:
         """A crop of ``text`` in ``font_path`` drawn in ``spec``, and what it shows.
 
-        For font-style data: no faux bold, no outline and no neighbouring-line context
-        (a table rule in the margin would look like an underline). Returns the image
+        For font-style data: no faux bold, no outline, and of the page context the
+        neighbouring lines and the borders of a cell, but never a rule below the word (it would
+        look like an underline). Returns the image
         and ``{"color": ...}``, the ink colour measured on the finished crop.
         """
         return self._generate(text, font_path, spec)
@@ -197,23 +198,54 @@ class TextImageGenerator:
         return tuple(int(round(text_height * random.uniform(lo, hi))) for _ in range(4))  # type: ignore[return-value]
 
     def _context(
-        self, size: tuple[int, int], box: tuple[int, int, int, int], text: str, font_path: str, font_size: int, style
+        self,
+        size: tuple[int, int],
+        box: tuple[int, int, int, int],
+        text: str,
+        font_path: str,
+        font_size: int,
+        style,
+        rules: bool = True,
+        weight: int | None = None,
+        hand: float = 0.0,
+        cells: bool = False,
     ) -> Image.Image | None:
         """What a real crop picks up around a word: neighbouring lines and rules, in its margins only.
 
         ``box`` is where the word sits. Line fragments are placed so they leave the
         crop through its top or bottom edge - only the descenders of the line above
         or the tops of the line below show, never a readable character. They use the
-        word's own font and ink, so they are rendered (and shaped) like the word.
+        word's own font, ``weight``, ink and pen variation (``hand``), so they are
+        rendered (and shaped) like the word. ``rules=False`` leaves out the underlines
+        and table rules (a font-style label tells an underline); ``cells=True`` draws
+        the borders of a form or table cell instead: its sides, and its edge above
+        the word - never one below, where it would read as an underline.
         """
         width, height = size
         x0, y0, x1, y1 = box
         layer = Image.new("RGBA", size, (0, 0, 0, 0))
         placed = False
+        if cells and random.random() < 0.5:
+            thickness = max(1, font_size // 18)
+            border = (*style.fill_color, style.opacity) if random.random() < 0.5 else (90, 90, 90, 255)
+            draw = ImageDraw.Draw(layer)
+            for side, room in (("left", x0), ("right", width - x1)):
+                if room > thickness and random.random() < 0.6:
+                    x = (
+                        random.randint(0, room - thickness)
+                        if side == "left"
+                        else x1 + random.randint(0, room - thickness)
+                    )
+                    draw.rectangle((x, 0, x + thickness - 1, height), fill=border)
+                    placed = True
+            if y0 > thickness and random.random() < 0.4:
+                y = random.randint(0, y0 - thickness)
+                draw.rectangle((0, y, width, y + thickness - 1), fill=border)
+                placed = True
         for edge, room in (("top", y0), ("bottom", height - y1)):
             if room < 3 or random.random() >= 0.6:
                 continue
-            if random.random() < 0.3:  # an underline or a table rule
+            if rules and random.random() < 0.3:  # an underline or a table rule
                 thickness = max(1, font_size // 18)
                 y = random.randint(0, room - thickness) if edge == "top" else y1 + random.randint(0, room - thickness)
                 left, right = (
@@ -225,8 +257,14 @@ class TextImageGenerator:
                 placed = True
                 continue
             fragment = self.text_renderer.render_coverage(
-                text if random.random() < 0.5 else f"{text} {text}", font_path, font_size, style.bold_width
+                text if random.random() < 0.5 else f"{text} {text}",
+                font_path,
+                font_size,
+                style.bold_width,
+                weight=weight,
             )
+            if hand > 0:
+                fragment = hand_warp(fragment, hand, np.random.default_rng(random.getrandbits(32)))
             ink = recolor_coverage(fragment, style)
             visible = random.randint(max(1, room // 3), room)  # never past the word's own line
             y = visible - ink.height if edge == "top" else height - visible
@@ -285,9 +323,20 @@ class TextImageGenerator:
         word = Image.new("RGBA", size, (0, 0, 0, 0))
         word.paste(glyph, (left, top))
         canvas = bg_crop.convert("RGBA")
-        if spec is None and random.random() < self.config.recognition.context_prob:
+        if random.random() < self.config.recognition.context_prob:
+            # Styled crops (font style labels): the neighbouring lines and cell borders, never a rule below the word
+            # (it would read as an underline)
             context = self._context(
-                size, (left, top, left + glyph.width, top + glyph.height), text, font_path, font_size, style
+                size,
+                (left, top, left + glyph.width, top + glyph.height),
+                text,
+                font_path,
+                font_size,
+                style,
+                rules=spec is None,
+                weight=spec.weight if spec is not None else None,
+                hand=spec.hand if spec is not None else 0.0,
+                cells=spec is not None,  # form labels sit in boxes: their sides and top edge, never a rule below
             )
             if context is not None:
                 canvas.alpha_composite(context)

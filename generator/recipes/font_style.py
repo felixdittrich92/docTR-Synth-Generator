@@ -35,7 +35,7 @@ The labels are ground truth by construction:
 * **one class per design**: a family whose letters for a script are a copy of another
   family's (Heebo's Latin is Roboto's) does not render that script.
 * **document fonts**: the faces most pages are set in - Times, Helvetica, Courier,
-  Cambria, Computer Modern, ... as free metric-compatible clones (:data:`DOC_FONTS`).
+  Cambria, Computer Modern, ... as free metric-compatible clones (:data:`generator.recipes.fonts.DOC_FONTS`).
 
 Families are sampled uniformly (balanced classes), the document fonts
 :data:`DOC_FONT_WEIGHT` times more often; within a family, the language follows the
@@ -49,7 +49,6 @@ import random
 import shutil
 import sys
 import time
-import zipfile
 import zlib
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -58,7 +57,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from ..components.config import GenerationConfig
-from ..components.font_downloader import FontDownloader
+from ..components.font_downloader import _HANDWRITING_FONTS, _SIGNATURE_FONTS, FontDownloader
 from ..components.font_styles import (
     COLOR_NAMES,
     HIGHLIGHT_COLORS,
@@ -73,7 +72,15 @@ from ..components.vocabs import VOCABS
 from ..dataset_generator import SyntheticDatasetGenerator
 from .corpus import Corpus, http_get
 from .detection import clean_pool, enrich, page_weights
-from .fonts import ManifestFontSelector, assign_fonts, collect_fonts, require_harfbuzz, scan_fonts, write_font_dir
+from .fonts import (
+    ManifestFontSelector,
+    assign_fonts,
+    collect_fonts,
+    doc_fonts,
+    require_harfbuzz,
+    scan_fonts,
+    write_font_dir,
+)
 from .languages import LANGUAGES, primary_script, resolve_languages, script_of
 from .render import Progress, Worker, atomic_write_json, make_pool, render_part
 from .text import numeric_tokens
@@ -112,37 +119,24 @@ STYLE_FONTS = [
     ("arimo", "Arimo[wght].ttf"), ("arimo", "Arimo-Italic[wght].ttf"),
 ]  # fmt: skip
 
-# The faces most documents are set in, or metric-compatible clones of them, under free
-# licenses: Times (Tinos, TeX Gyre Termes), Helvetica (TeX Gyre Heros), Courier (Cousine),
-# Cambria (Caladea), Palatino (TeX Gyre Pagella), Bookman (TeX Gyre Bonum), Century
-# Schoolbook (TeX Gyre Schola), Verdana-like DejaVu Sans, Comic Sans (Comic Neue) and the
-# Computer Modern of LaTeX papers (Latin Modern). Without them the classifier never sees the
-# faces of most real pages, and names the closest look-alike of another script instead.
-_FACES = ("Regular", "Bold", "Italic", "BoldItalic")
-DOC_FONTS = [
-    *((family, f"{name}-{face}.ttf") for family, name in (("tinos", "Tinos"), ("cousine", "Cousine"),
-                                                           ("caladea", "Caladea"), ("comicneue", "ComicNeue"))
-      for face in _FACES),
-]  # fmt: skip
-# Fonts outside Google Fonts: (archive URL, members) - TeX Gyre and Latin Modern (GUST font
-# license), DejaVu (Bitstream Vera license).
-DOC_FONT_ARCHIVES = [
-    ("https://mirrors.ctan.org/fonts/tex-gyre.zip",
-     [f"tex-gyre/opentype/texgyre{name}-{face}.otf" for name in ("termes", "heros", "pagella", "bonum", "schola")
-      for face in ("regular", "bold", "italic", "bolditalic")]),
-    ("https://mirrors.ctan.org/fonts/lm.zip",
-     [f"lm/fonts/opentype/public/lm/{name}.otf" for name in (
-         "lmroman10-regular", "lmroman10-bold", "lmroman10-italic", "lmroman10-bolditalic",
-         "lmsans10-regular", "lmsans10-bold", "lmsans10-oblique", "lmsans10-boldoblique",
-         "lmmono10-regular", "lmmono10-italic")]),
-    ("https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip",
-     [f"dejavu-fonts-ttf-2.37/ttf/{name}.ttf" for name in (
-         "DejaVuSans", "DejaVuSans-Bold", "DejaVuSans-Oblique", "DejaVuSans-BoldOblique",
-         "DejaVuSansMono", "DejaVuSansMono-Bold", "DejaVuSansMono-Oblique", "DejaVuSansMono-BoldOblique")]),
-]  # fmt: skip
 # Real pages are mostly set in these faces: they are drawn this many times more often than the
 # other families (the classifier's prior then follows documents, not the font collection).
 DOC_FONT_WEIGHT = 3
+
+# Handwriting: the everyday hands and signature styles of every script that the recognition
+# and detection recipes write with too (:data:`_HANDWRITING_FONTS`, :data:`_SIGNATURE_FONTS`),
+# so that "handwritten" is learned from writing rather than from the few casual faces of a font
+# collection.
+# Faces Google Fonts files under handwriting that are typeset in practice (Comic Neue is a
+# Comic Sans) or neat print (textbook and KaiTi faces): printed text, not handwriting.
+PRINTED_LOOKALIKES = {"Comic Neue", "Itim", "Mali", "Klee One", "LXGW WenKai TC"}
+# Share of the handwritten crops drawn with the variation of a hand (:func:`hand_warp`),
+# and of the printed crops slightly warped (a curved page): a wobble alone is not handwriting.
+HAND_PROB, PRINTED_WARP_PROB = 0.8, 0.08
+# Words in capitals: block capitals are common in handwriting (forms, signs, markers).
+UPPER_PROB = {True: 0.25, False: 0.06}
+# Ballpoint blue is the most common coloured ink of handwriting.
+HANDWRITTEN_BLUE_PROB = 0.3
 
 # What a crop is set in. Weights follow documents (regular and bold most often) but
 # every weight a face offers appears; underlines, strike-outs and highlights are the
@@ -195,32 +189,29 @@ def _style_fonts(cache: Path, offline: bool) -> list[Path]:
     return out
 
 
-def _doc_fonts(cache: Path, offline: bool) -> list[Path]:
-    """The :data:`DOC_FONTS` and :data:`DOC_FONT_ARCHIVES` faces (downloaded once into ``cache/doc_fonts``)."""
-    folder = cache / "doc_fonts"
+def _handwriting_fonts(cache: Path, offline: bool) -> list[Path]:
+    """The handwriting and signature faces of every script (downloaded once into ``cache/handwriting_fonts``)."""
+    folder = cache / "handwriting_fonts"
     folder.mkdir(parents=True, exist_ok=True)
     downloader = FontDownloader(cache_dir=str(folder), enabled=not offline)
+    entries = {
+        (family, filenames[0])
+        for table in (_HANDWRITING_FONTS, _SIGNATURE_FONTS)
+        for faces in table.values()
+        for family, filenames in faces
+    }
     out = []
-    for family, filename in DOC_FONTS:
-        local = folder / f"{family}__{filename}"
+    for family, filename in sorted(entries):
+        local = folder / f"{family}__{filename}".replace("[", "_").replace("]", "_").replace(",", "_")
         path = str(local) if local.exists() else (downloader._download(family, filename) if not offline else None)
         if path:
             out.append(Path(path))
-    for url, members in DOC_FONT_ARCHIVES:
-        missing = [m for m in members if not (folder / m.rsplit("/", 1)[-1]).exists()]
-        archive = folder / url.rsplit("/", 1)[-1]
-        if missing and not archive.exists() and not offline:
-            data = http_get(url, timeout=600)
-            if data:
-                archive.write_bytes(data)
-            else:
-                print(f"  WARNING: could not download {url}")
-        if missing and archive.exists():
-            with zipfile.ZipFile(archive) as z:
-                for member in missing:
-                    (folder / member.rsplit("/", 1)[-1]).write_bytes(z.read(member))
-        out += [folder / m.rsplit("/", 1)[-1] for m in members if (folder / m.rsplit("/", 1)[-1]).exists()]
     return out
+
+
+def is_handwritten(family: str, category: str) -> bool:
+    """Whether the crops of a family are handwriting: its category, unless it is typeset in practice."""
+    return category == "HANDWRITING" and family not in PRINTED_LOOKALIKES
 
 
 def _category(family: str, cache_file: Path, offline: bool) -> str:
@@ -479,8 +470,8 @@ def prepare(args) -> None:
     print("Fonts ...")
     paths = collect_fonts(Path(args.font_src), cache / "google_fonts", download_extra=not args.offline)
     paths += _style_fonts(cache, args.offline)
-    doc_paths = _doc_fonts(cache, args.offline)
-    paths += doc_paths
+    doc_paths = doc_fonts(cache, args.offline)  # in ``paths`` already: kept for their weight
+    paths += _handwriting_fonts(cache, args.offline)
     fonts = scan_fonts(paths, cache / "font_scan.json")
     freq = {lang: Counter(c for w in ws for c in w) for lang, ws in pools.items()}
     lang_fonts, _ = assign_fonts(fonts, freq, langs)
@@ -512,6 +503,7 @@ def prepare(args) -> None:
         fam["languages"] = sorted(fam["languages"])
         fam["variants"] = sorted(fam["variants"].values(), key=lambda v: v["file"])
         fam["category"] = KNOWN_CATEGORIES.get(name) or _category(name, cache / "gf_categories.json", args.offline)
+        fam["handwritten"] = is_handwritten(name, fam["category"])
 
     print("Texts ...")
     for lang in langs:
@@ -539,6 +531,7 @@ def prepare(args) -> None:
             "italic": [False, True],
             "underline": ["none", "single", "double"],
             "strikethrough": [False, True],
+            "handwritten": [False, True],
             "highlight": [None, *HIGHLIGHT_COLORS],
             "color": list(COLOR_NAMES),
         },
@@ -629,17 +622,24 @@ class StyleWorker(Worker):
         return ""
 
     @staticmethod
-    def _spec(weight: int | None, rng: random.Random) -> StyleSpec:
+    def _spec(weight: int | None, rng: random.Random, handwritten: bool = False) -> StyleSpec:
         underline = rng.choices(list(UNDERLINE_PRIOR), weights=list(UNDERLINE_PRIOR.values()))[0]
         highlight = rng.choice(list(HIGHLIGHT_COLORS)) if rng.random() < HIGHLIGHT_PROB else None
         colored = rng.random() < COLORED_PROB
         hue = INK_HUES[rng.choice(list(INK_HUES))] if colored else None
+        if handwritten and rng.random() < HANDWRITTEN_BLUE_PROB:
+            colored, hue = True, INK_HUES["blue"]
+        if handwritten:
+            hand = rng.uniform(0.4, 1.0) if rng.random() < HAND_PROB else 0.0
+        else:
+            hand = rng.uniform(0.15, 0.35) if rng.random() < PRINTED_WARP_PROB else 0.0
         return StyleSpec(
             weight=weight,
             decorations=Decorations(underline=underline, strikethrough=rng.random() < STRIKE_PROB),
             highlight=HIGHLIGHT_COLORS[highlight] if highlight else None,
             ink_hue=hue,
             neutral=not colored,
+            hand=hand,
         )
 
     def render(self, payload, path):
@@ -650,15 +650,19 @@ class StyleWorker(Worker):
         np.random.seed(seed % (2**32))
         font_path = str(self.font_dir / file)
         chars = self.chars[file]
+        handwritten = bool(self.families[family].get("handwritten", False))
+        upper = rng.random() < UPPER_PROB[handwritten]
         for _ in range(30):  # a text this exact face inks and shapes cleanly
             text = self._text(lang, split, rng)
+            if upper and text.upper() != text and set(text.upper()) - {" "} <= chars:
+                text = text.upper()
             if text and set(text) - {" "} <= chars and self.selector.shaping.ok(text, font_path):
                 break
         else:
             return None
         traits = font_traits(font_path)
         weight = int(weight) if traits.weight_range else traits.weight
-        spec = self._spec(weight if traits.weight_range else None, rng)
+        spec = self._spec(weight if traits.weight_range else None, rng, handwritten)
         result = self.gen.generate_styled(text, font_path, spec)
         if result is None:
             return None
@@ -679,6 +683,7 @@ class StyleWorker(Worker):
             "strikethrough": spec.decorations.strikethrough,
             "highlight": highlight,
             "color": info["color"],
+            "handwritten": handwritten,
         }
 
 

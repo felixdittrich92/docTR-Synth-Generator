@@ -266,7 +266,7 @@ def test_plan_draws_document_fonts_more_often():
 def test_document_fonts_come_from_the_cache_offline(tmp_path, monkeypatch):
     import zipfile
 
-    from generator.recipes import font_style
+    from generator.recipes import fonts as font_style
 
     folder = tmp_path / "doc_fonts"
     folder.mkdir()
@@ -279,9 +279,9 @@ def test_document_fonts_come_from_the_cache_offline(tmp_path, monkeypatch):
     with zipfile.ZipFile(folder / "lm.zip", "w") as z:
         z.writestr("lm/otf/lmroman10-regular.otf", b"otf")
     with pytest.raises(KeyError):  # a member missing from the archive is an error, not a silent gap
-        font_style._doc_fonts(tmp_path, offline=True)
+        font_style.doc_fonts(tmp_path, offline=True)
     monkeypatch.setattr(font_style, "DOC_FONT_ARCHIVES", [(url, ["lm/otf/lmroman10-regular.otf"])])
-    paths = font_style._doc_fonts(tmp_path, offline=True)
+    paths = font_style.doc_fonts(tmp_path, offline=True)
     assert [p.name for p in paths] == ["tinos__Tinos-Regular.ttf", "lmroman10-regular.otf"]
     assert (folder / "lmroman10-regular.otf").read_bytes() == b"otf"
 
@@ -291,3 +291,43 @@ def test_known_categories_are_valid():
 
     assert set(KNOWN_CATEGORIES.values()) <= set(CATEGORIES)
     assert KNOWN_CATEGORIES["TeX Gyre Termes"] == "SERIF" and KNOWN_CATEGORIES["TeX Gyre Heros"] == "SANS_SERIF"
+
+
+def test_hand_warp_moves_the_ink_like_a_hand(tmp_path):
+    from generator.components.font_styles import hand_warp
+
+    coverage = Image.new("RGBA", (300, 80), (0, 0, 0, 0))
+    alpha = np.zeros((80, 300), np.uint8)
+    alpha[20:60, 20:280:20] = 255  # vertical strokes, like letters
+    alpha[66:69, 20:280] = 255  # an underline
+    coverage.putalpha(Image.fromarray(alpha))
+    assert hand_warp(coverage, 0.0) is coverage
+    warped = hand_warp(coverage, 1.0, np.random.default_rng(0))
+    out = np.asarray(warped.getchannel("A"), np.float32)
+    pad = (warped.width - coverage.width) // 2
+    assert warped.mode == "RGBA" and warped.height - coverage.height == 2 * pad > 0
+    # the ink moves (the underline is no longer a straight row) but none of it is lost
+    rows = out[:, 20 + pad : 280 + pad]
+    underline_rows = {int(np.argmax(rows[60 + pad :, x])) for x in range(0, 260, 10)}
+    assert len(underline_rows) > 1
+    assert 0.6 * alpha.sum() < out.sum() <= alpha.sum() * 1.05
+
+
+def test_handwritten_families():
+    from generator.recipes.font_style import PRINTED_LOOKALIKES, is_handwritten
+
+    assert is_handwritten("Caveat", "HANDWRITING")
+    assert not is_handwritten("Comic Neue", "HANDWRITING") and "Comic Neue" in PRINTED_LOOKALIKES
+    assert not is_handwritten("Roboto", "SANS_SERIF")
+
+
+def test_handwriting_fonts_come_from_the_cache_offline(tmp_path, monkeypatch):
+    from generator.recipes import font_style
+
+    folder = tmp_path / "handwriting_fonts"
+    folder.mkdir()
+    (folder / "caveat__Caveat_wght_.ttf").write_bytes(b"ttf")
+    monkeypatch.setattr(font_style, "_HANDWRITING_FONTS", {"latin": [("caveat", ["Caveat[wght].ttf"])]})
+    monkeypatch.setattr(font_style, "_SIGNATURE_FONTS", {"latin": [("allura", ["Allura-Regular.ttf"])]})
+    paths = font_style._handwriting_fonts(tmp_path, offline=True)
+    assert [p.name for p in paths] == ["caveat__Caveat_wght_.ttf"]  # the signature face is not cached

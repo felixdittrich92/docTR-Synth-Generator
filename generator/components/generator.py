@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw
 from .background_manager import BackgroundManager
 from .config import GenerationConfig
 from .font_selector import FontSelector
-from .font_styles import StyleSpec, color_name, paint_highlight
+from .font_styles import StyleSpec, color_name, hand_warp, paint_highlight
 from .legibility import DegradationBudget, local_ink_contrast
 from .scan import apply_scan_tone
 from .text_renderer import TextRenderer, TextStyle
@@ -103,13 +103,14 @@ class TextImageGenerator:
         budget = DegradationBudget.for_text_height(text_height) if text_height else None
         return apply_final_degradations(self.config, image, self.final_augs, budget)
 
-    def generate_image(self, text: str, font_path: str | None = None) -> Image.Image | None:
+    def generate_image(self, text: str, font_path: str | None = None, hand: float = 0.0) -> Image.Image | None:
         """Generate a single text overlay image.
 
         Args:
             text (str): Text to render
             font_path (str | None): use this face (e.g. a handwriting face) instead of
                 resolving one through the font selector.
+            hand (float): strength of the pen variation (:func:`hand_warp`) for handwriting, 0 for print.
 
         Returns:
             Image.Image | None: RGB image with realistic text overlay, or None if
@@ -118,7 +119,7 @@ class TextImageGenerator:
         font_path = font_path or self.font_selector.get_font_for_text(text)
         if not font_path:
             return None
-        result = self._generate(text, font_path, None)
+        result = self._generate(text, font_path, None, hand)
         return result[0] if result else None
 
     def generate_styled(self, text: str, font_path: str, spec: StyleSpec) -> tuple[Image.Image, dict] | None:
@@ -130,7 +131,9 @@ class TextImageGenerator:
         """
         return self._generate(text, font_path, spec)
 
-    def _generate(self, text: str, font_path: str, spec: StyleSpec | None) -> tuple[Image.Image, dict] | None:
+    def _generate(
+        self, text: str, font_path: str, spec: StyleSpec | None, hand: float = 0.0
+    ) -> tuple[Image.Image, dict] | None:
         """The re-draw loop shared by :meth:`generate_image` and :meth:`generate_styled`."""
         # Background and ink are re-drawn until the finished crop is readable along
         # its whole length: a dark band or busy patch of paper under part of the
@@ -157,6 +160,9 @@ class TextImageGenerator:
                     break
             if coverage is None:
                 continue
+            strength = spec.hand if spec is not None else hand
+            if strength > 0:
+                coverage = hand_warp(coverage, strength, np.random.default_rng(random.getrandbits(32)))
             for _ in range(max(1, self.config.core.max_attempts)):
                 image, alpha = self._compose(text, font_path, font_size, coverage, outline_width, bold_width, spec)
                 if min_contrast <= 0 or local_ink_contrast(image, alpha) >= min_contrast:

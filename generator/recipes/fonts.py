@@ -31,6 +31,7 @@ import zipfile
 from collections import Counter
 from pathlib import Path
 
+from ..components.font_downloader import FontDownloader
 from ..components.font_selector import FontSelector
 from ..components.shaping import HAS_HARFBUZZ
 from ..components.vocabs import VOCABS
@@ -40,7 +41,17 @@ from .languages import COMPLEX_SCRIPT_TAGS, LANGUAGES, allowed_scripts, script_o
 if HAS_HARFBUZZ:
     import uharfbuzz as hb
 
-__all__ = ["collect_fonts", "scan_fonts", "assign_fonts", "write_font_dir", "ManifestFontSelector", "require_harfbuzz"]
+__all__ = [
+    "collect_fonts",
+    "doc_fonts",
+    "DOC_FONTS",
+    "DOC_FONT_ARCHIVES",
+    "scan_fonts",
+    "assign_fonts",
+    "write_font_dir",
+    "ManifestFontSelector",
+    "require_harfbuzz",
+]
 
 FONTS_V1_URL = "https://github.com/felixdittrich92/docTR-Synth-Generator/releases/download/v0.0.1/fonts_v1.zip"
 
@@ -174,8 +185,67 @@ def require_harfbuzz() -> None:
 # -----------------------------------------------------------------------------
 
 
+# The faces most documents are set in, or metric-compatible clones of them, under free
+# licenses: Times (Tinos, TeX Gyre Termes), Helvetica (TeX Gyre Heros), Courier (Cousine),
+# Cambria (Caladea), Palatino (TeX Gyre Pagella), Bookman (TeX Gyre Bonum), Century
+# Schoolbook (TeX Gyre Schola), Verdana-like DejaVu Sans, Comic Sans (Comic Neue) and the
+# Computer Modern of LaTeX papers (Latin Modern). Without them the classifier never sees the
+# faces of most real pages, and names the closest look-alike of another script instead.
+_FACES = ("Regular", "Bold", "Italic", "BoldItalic")
+DOC_FONTS = [
+    *((family, f"{name}-{face}.ttf") for family, name in (("tinos", "Tinos"), ("cousine", "Cousine"),
+                                                           ("caladea", "Caladea"), ("comicneue", "ComicNeue"))
+      for face in _FACES),
+]  # fmt: skip
+# Fonts outside Google Fonts: (archive URL, members) - TeX Gyre and Latin Modern (GUST font
+# license), DejaVu (Bitstream Vera license).
+DOC_FONT_ARCHIVES = [
+    ("https://mirrors.ctan.org/fonts/tex-gyre.zip",
+     [f"tex-gyre/opentype/texgyre{name}-{face}.otf" for name in ("termes", "heros", "pagella", "bonum", "schola")
+      for face in ("regular", "bold", "italic", "bolditalic")]),
+    ("https://mirrors.ctan.org/fonts/lm.zip",
+     [f"lm/fonts/opentype/public/lm/{name}.otf" for name in (
+         "lmroman10-regular", "lmroman10-bold", "lmroman10-italic", "lmroman10-bolditalic",
+         "lmsans10-regular", "lmsans10-bold", "lmsans10-oblique", "lmsans10-boldoblique",
+         "lmmono10-regular", "lmmono10-italic")]),
+    ("https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip",
+     [f"dejavu-fonts-ttf-2.37/ttf/{name}.ttf" for name in (
+         "DejaVuSans", "DejaVuSans-Bold", "DejaVuSans-Oblique", "DejaVuSans-BoldOblique",
+         "DejaVuSansMono", "DejaVuSansMono-Bold", "DejaVuSansMono-Oblique", "DejaVuSansMono-BoldOblique")]),
+]  # fmt: skip
+
+
+def doc_fonts(cache: Path, offline: bool) -> list[Path]:
+    """The :data:`DOC_FONTS` and :data:`DOC_FONT_ARCHIVES` faces (downloaded once into ``cache/doc_fonts``)."""
+    folder = cache / "doc_fonts"
+    folder.mkdir(parents=True, exist_ok=True)
+    downloader = FontDownloader(cache_dir=str(folder), enabled=not offline)
+    out = []
+    for family, filename in DOC_FONTS:
+        local = folder / f"{family}__{filename}"
+        path = str(local) if local.exists() else (downloader._download(family, filename) if not offline else None)
+        if path:
+            out.append(Path(path))
+    for url, members in DOC_FONT_ARCHIVES:
+        missing = [m for m in members if not (folder / m.rsplit("/", 1)[-1]).exists()]
+        archive = folder / url.rsplit("/", 1)[-1]
+        if missing and not archive.exists() and not offline:
+            data = http_get(url, timeout=600)
+            if data:
+                archive.write_bytes(data)
+            else:
+                print(f"  WARNING: could not download {url}")
+        if missing and archive.exists():
+            with zipfile.ZipFile(archive) as z:
+                for member in missing:
+                    (folder / member.rsplit("/", 1)[-1]).write_bytes(z.read(member))
+        out += [folder / m.rsplit("/", 1)[-1] for m in members if (folder / m.rsplit("/", 1)[-1]).exists()]
+    return out
+
+
 def collect_fonts(font_src: Path, extra_dir: Path, download_extra: bool = True) -> list[Path]:
-    """All candidate font files: ``fonts_v1`` (downloaded if missing) + :data:`EXTRA_FONTS`."""
+    """All candidate font files: ``fonts_v1`` (downloaded if missing) + :data:`EXTRA_FONTS` + the document fonts
+    (:data:`DOC_FONTS`, cached next to ``extra_dir``)."""
     if not font_src.exists():
         print(f"Downloading fonts_v1 -> {font_src} ...")
         data = http_get(FONTS_V1_URL, timeout=600)
@@ -195,7 +265,7 @@ def collect_fonts(font_src: Path, extra_dir: Path, download_extra: bool = True) 
                     dst.write_bytes(data)
                 else:
                     print(f"  WARNING: could not download {rel}")
-    files = list(font_src.rglob("*")) + list(extra_dir.iterdir())
+    files = list(font_src.rglob("*")) + list(extra_dir.iterdir()) + doc_fonts(extra_dir.parent, not download_extra)
     return sorted(p for p in files if p.is_file() and p.suffix.lower() in (".ttf", ".otf"))
 
 

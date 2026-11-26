@@ -1233,3 +1233,61 @@ def test_unknown_negative_kind_is_rejected(tiny_font_dir):
     pg = PageGenerator(_cfg(tiny_font_dir))
     with pytest.raises(ValueError, match="negative kind"):
         pg.generate_page(WORDS, negative=True, negative_kind="poster")
+
+
+def test_signatures_are_boxed_words_that_never_cover_text(tiny_font_dir):
+    import os
+
+    pg = PageGenerator(_cfg(tiny_font_dir))
+    page = Image.new("RGBA", (400, 520), (250, 250, 248, 255))
+    words = iter(["Ann", "Miller"] * 50)
+    # No signature face (downloads off): the caller falls back to a squiggle
+    assert not pg._sign(page, (10, 10, 390, 510), lambda: next(words), [], 16)
+    # A signature face: the signed words are boxed, and avoid the printed words
+    face = os.path.join(tiny_font_dir, "Tiny-Regular.ttf")
+    pg.font_selector.signature_fonts.add(face)
+    printed = [[[10, 10], [390, 10], [390, 300], [10, 300]]]
+    polygons = list(printed)
+    random.seed(0)
+    np.random.seed(0)
+    assert pg._sign(page, (10, 10, 390, 510), lambda: next(words), polygons, 16)
+    signed = polygons[len(printed) :]
+    assert 1 <= len(signed) <= 2
+    for poly in signed:
+        xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+        assert min(ys) >= 300 and min(xs) >= 10 and max(xs) <= 390 and max(ys) <= 510
+    # A full area leaves no room to sign
+    assert not pg._sign(page, (10, 10, 390, 300), lambda: next(words), list(printed), 16)
+
+
+def test_handwritten_values_follow_the_warped_ink(tiny_font_dir, monkeypatch):
+    import os
+
+    from generator.components import page_generator
+
+    monkeypatch.setattr(page_generator, "HAND_WARP_PROB", 1.0)
+    pg = PageGenerator(_cfg(tiny_font_dir))
+    face = os.path.join(tiny_font_dir, "Tiny-Regular.ttf")
+    monkeypatch.setattr(pg, "_handwriting_font", lambda text: face)
+    page = Image.new("RGBA", (400, 120), (250, 250, 248, 255))
+    polygons = []
+    words = iter(["note", "taken", "today"] * 10)
+    assert pg._write_by_hand(page, (10, 20, 390, 80), lambda: next(words), polygons, 16, TextStyleStub())
+    alpha = np.asarray(page.convert("L"), np.float32) < 200  # the ink
+    for poly in polygons:
+        (x0, y0), (x1, y1) = poly[0], poly[2]
+        assert alpha[y0:y1, x0:x1].any()  # each box holds ink
+    # all the ink is inside a box
+    inside = np.zeros_like(alpha)
+    for poly in polygons:
+        (x0, y0), (x1, y1) = poly[0], poly[2]
+        inside[y0 : y1 + 1, x0 : x1 + 1] = True
+    assert not (alpha & ~inside).any()
+
+
+class TextStyleStub:
+    fill_color = (20, 20, 25)
+    opacity = 255
+    bold_width = 0
+    outline_color = None
+    outline_width = 0

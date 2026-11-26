@@ -94,7 +94,8 @@ class StyleSpec:
 
     ``weight`` selects an instance of a variable face (``None``: the face as it is);
     ``highlight`` is a marker colour behind the word; ``ink_hue`` asks for a coloured
-    ink, ``neutral`` for black/gray/white - the measured colour is what gets labelled.
+    ink, ``neutral`` for black/gray/white - the measured colour is what gets labelled;
+    ``hand`` draws the word as a hand would (:func:`hand_warp`).
     """
 
     weight: int | None = None
@@ -102,6 +103,7 @@ class StyleSpec:
     highlight: tuple[int, int, int] | None = None
     ink_hue: tuple[int, int, int] | None = None
     neutral: bool = False
+    hand: float = 0.0  # strength of the pen variation (:func:`hand_warp`), 0 for typeset text
 
 
 def _name(font: TTFont, *ids: int) -> str | None:
@@ -243,3 +245,73 @@ def paint_highlight(
     tint = np.asarray(colour, np.float32) / 255.0
     out = bg * (1 - mask[..., None]) + bg * tint[None, None, :] * mask[..., None]
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
+
+
+def _smooth_noise(shape: tuple[int, int], cell: float, rng: np.random.Generator) -> np.ndarray:
+    """Smooth random field in [-1, 1] whose features are ~``cell`` pixels wide (a bicubic-upsampled coarse grid)."""
+    h, w = shape
+    gh, gw = max(2, int(h / cell) + 2), max(2, int(w / cell) + 2)
+    grid = Image.fromarray(rng.uniform(-1, 1, (gh, gw)).astype(np.float32), mode="F")
+    return np.asarray(grid.resize((w, h), Image.Resampling.BICUBIC), dtype=np.float32).clip(-1, 1)
+
+
+def _sample(img: np.ndarray, ys: np.ndarray, xs: np.ndarray) -> np.ndarray:
+    """Bilinear sampling of a 2D array at float coordinates (0 outside)."""
+    h, w = img.shape
+    padded = np.pad(img, 1)
+    ys, xs = ys + 1, xs + 1
+    y0, x0 = np.floor(ys).astype(int), np.floor(xs).astype(int)
+    fy, fx = ys - y0, xs - x0
+    y0, x0 = y0.clip(0, h), x0.clip(0, w)
+    y1, x1 = (y0 + 1).clip(0, h + 1), (x0 + 1).clip(0, w + 1)
+    top = padded[y0, x0] * (1 - fx) + padded[y0, x1] * fx
+    bottom = padded[y1, x0] * (1 - fx) + padded[y1, x1] * fx
+    return top * (1 - fy) + bottom * fy
+
+
+def hand_warp(coverage: Image.Image, strength: float, rng: np.random.Generator | None = None) -> Image.Image:
+    """Draw a typeset word as a hand would: a wavy, drifting baseline, letters that wander a little and an
+    uneven pen pressure. Applied to the glyph coverage map (decorations included: an underline drawn by hand
+    wobbles too), so the background is untouched.
+
+    Args:
+        coverage: the RGBA coverage map of the word (ink in the alpha channel)
+        strength: 0 (typeset) to 1 (a quick, uneven hand)
+        rng: random generator
+
+    Returns:
+        the warped coverage map, padded so that no ink leaves the image
+    """
+    if strength <= 0:
+        return coverage
+    rng = rng or np.random.default_rng()
+    alpha = np.asarray(coverage.getchannel("A"), dtype=np.float32)
+    rows = np.flatnonzero(alpha.max(axis=1) > 64)
+    if len(rows) < 2:
+        return coverage
+    size = float(rows[-1] - rows[0] + 1)  # the height of the ink
+    pad = int(np.ceil(0.12 * size * strength)) + 1
+    alpha = np.pad(alpha, pad)
+    h, w = alpha.shape
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    # The baseline: a slow wave and a drift (the line is not ruled)
+    wave = strength * rng.uniform(0.02, 0.07) * size
+    period = rng.uniform(2.5, 7.0) * size
+    drift = strength * rng.uniform(-0.04, 0.04)
+    dy = wave * np.sin(2 * np.pi * xs / period + rng.uniform(0, 2 * np.pi)) + drift * (xs - w / 2)
+    # Letters wander: a smooth displacement a few percent of the ink height, at the scale of a letter
+    jitter = strength * rng.uniform(0.02, 0.05) * size
+    dy = dy + jitter * _smooth_noise((h, w), 0.6 * size, rng)
+    dx = jitter * _smooth_noise((h, w), 0.6 * size, rng)
+    warped = _sample(alpha, ys - dy, xs - dx)
+    # Uneven pen pressure: the ink fades in places
+    pressure = 1 - strength * rng.uniform(0.0, 0.3) * (0.5 + 0.5 * _smooth_noise((h, w), size, rng))
+    warped = (warped * pressure).clip(0, 255).astype(np.uint8)
+    rgb = np.asarray(coverage.convert("RGB"), dtype=np.uint8)
+    rgb = np.pad(rgb, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
+    out = Image.fromarray(np.dstack([rgb, warped]), mode="RGBA")
+    # Placement metadata of the renderer: the ink keeps its place on the page (the padding shifts it)
+    out.info = dict(coverage.info)
+    if "ink_top" in out.info:
+        out.info["ink_top"] = out.info["ink_top"] - pad
+    return out

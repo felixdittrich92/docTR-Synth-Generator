@@ -117,6 +117,9 @@ SHORT_TOP_RANKS = 5000
 # read verbatim. Real word lists contain none of them.
 MRZ_SHARE = 0.005
 HANDWRITING_SHARE = 0.05
+# Of the handwritten crops: the share signed (a signature face) and the share drawn with the
+# variation of a hand (wavy baseline, wandering letters, uneven pressure: ``hand_warp``).
+SIGNATURE_SHARE, HAND_WARP_PROB = 0.2, 0.8
 NATIVE_DIGIT_PROB = 0.4
 # Case variants, drawn independently per word and added next to it: forms, receipts and
 # headings are set in capitals far more than running text, so a pool of mostly lower-case
@@ -527,8 +530,13 @@ class CropWorker(Worker):
         """Render ``(lang, text)``; the label record is the text itself."""
         lang, text = payload
         self.selector.language = None if lang == "*" else lang
-        hand = self.selector.get_handwriting_font(text) if random.random() < self.handwriting_share else None
-        img = self.gen.generate_image(text, font_path=hand)
+        hand = None
+        if random.random() < self.handwriting_share:
+            if random.random() < SIGNATURE_SHARE:
+                hand = self.selector.get_signature_font(text)
+            hand = hand or self.selector.get_handwriting_font(text)
+        strength = random.uniform(0.4, 1.0) if hand and random.random() < HAND_WARP_PROB else 0.0
+        img = self.gen.generate_image(text, font_path=hand, hand=strength)
         if img is None:
             return None
         img.save(path, self.save[0], **self.save[1])

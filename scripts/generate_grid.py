@@ -12,8 +12,9 @@
     python scripts/generate_grid.py --det /tmp/det --rec /tmp/rec --style /tmp/style -o docs/examples.jpg
 
 Two rows of detection pages (one layout and language each, plus a text-free hard
-negative), then printed and handwritten recognition crops in many scripts, each with
-its exact label, and font style crops with their family, weight and emphasis labels.
+negative; the form and the report signed), then printed, handwritten and signed
+recognition crops in many scripts, each with its exact label, and font style crops with
+their family, weight, emphasis and handwriting labels.
 """
 
 import argparse
@@ -27,6 +28,7 @@ import numpy as np
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from generator.components import page_generator
 from generator.components.config import GenerationConfig
 from generator.dataset_generator import SyntheticDatasetGenerator
 from generator.recipes import detection
@@ -41,13 +43,13 @@ from generator.recipes.recognition import CropWorker, _read_tsv
 PAGES: list[tuple] = [  # (lang, layout, density, capture, caption[, pinned seed])
     ("en", "paragraph", "low", "photo", "Report · English · phone photo"),
     ("de", "receipt", "low", "photo", "Receipt · German · photo"),
-    ("ru", "newspaper", "high", "gray", "Dense newspaper · Russian · gray scan"),
+    ("el", "newspaper", "high", "gray", "Dense newspaper · Greek · gray scan"),
     ("ar", "id_card", "low", "photo", "ID card · Arabic · phone photo"),
-    ("de", "form", "low", "bw", "Form, by hand · German · B&W copy"),
+    ("de", "form", "low", "bw", "Form, by hand, signed · German · B&W copy"),
     ("hi", "table", "low", "scan", "Table · Hindi · scan"),
     ("ja", "vertical", "low", "photo", "Vertical · Japanese · phone photo"),
     ("he", "paragraph", "medium", "design", "Magazine · Hebrew · generated design", 11),
-    ("el", "id_card", "low", "scan", "ID card, chip + MRZ · Greek · scan"),
+    ("ru", "id_card", "low", "scan", "ID card, chip + MRZ, signed · Russian · scan"),
     ("en", None, "low", "photo", "No text (hard negative) · photo"),
 ]
 # (script group, language) for the crop grid.
@@ -58,10 +60,15 @@ CROPS = [
     ("TELUGU", "te"), ("KANNADA", "kn"), ("MALAYALAM", "ml"), ("SINHALA", "si"), ("THAI", "th"), ("LAO", "lo"),
     ("KHMER", "km"), ("MYANMAR", "my"), ("GEORGIAN", "ka"), ("ARMENIAN", "hy"), ("ETHIOPIC", "am"),
 ]  # fmt: skip
-# Handwritten crops (filled-in forms, notes): one row.
+# Handwritten crops (filled-in forms, notes): one row, drawn by a hand (``hand_warp``).
 HAND_CROPS = [
     ("LATIN", "de"), ("CYRILLIC", "ru"), ("GREEK", "el"), ("ARABIC", "ar"), ("THAI", "th"), ("CJK", "ja"),
     ("HANGUL", "ko"),
+]  # fmt: skip
+# Signed crops: one row in the signature faces.
+SIGN_CROPS = [
+    ("LATIN", "en"), ("LATIN", "de"), ("LATIN", "fr"), ("LATIN", "es"), ("LATIN", "pl"), ("LATIN", "it"),
+    ("CYRILLIC", "ru"),
 ]  # fmt: skip
 # Font style examples: one crop per (description, test on its label record), two rows of seven.
 STYLE_PICKS = [
@@ -78,7 +85,7 @@ STYLE_PICKS = [
     ("cjk", lambda r: r["lang"] in ("zh", "ja", "ko") and r["weight"] >= 600),
     ("cyrillic", lambda r: r["lang"] in ("ru", "uk", "bg") and r["italic"]),
     ("blue", lambda r: r["color"] == "blue"),
-    ("black weight", lambda r: r["weight"] >= 900),
+    ("handwritten", lambda r: r.get("handwritten") and r["lang"] in ("en", "de", "fr", "es") and r["color"] != "white"),
 ]
 WIDTH, MARGIN, GAP, RADIUS = 2400, 40, 22, 14
 STYLE_CELL_H = 128
@@ -114,6 +121,9 @@ def detection_pages(det_out: Path, bg_dir: str | None, seed: int) -> list[tuple[
         cfg.detection.crease_prob = 1.0 if layout == "receipt" else 0.0
         cfg.detection.picture_prob = 1.0 if layout == "paragraph" and capture == "photo" else 0.0
         cfg.detection.handwriting_prob = 1.0 if layout == "form" else 0.35
+        # The form and the report are signed (a name in a signature face, boxed like any word)
+        cfg.detection.signature_prob = 1.0 if layout in ("form", "paragraph") else 0.0
+        page_generator.WRITTEN_SIGNATURE_PROB = 1.0
         # A copier sheet is plain paper; on a textured background thresholding would
         # erase words, and the generator then (rightly) falls back to grayscale.
         cfg.detection.plain_background_prob = 1.0 if capture == "bw" else 0.0 if capture == "design" else plain
@@ -168,17 +178,24 @@ def recognition_crops(rec_out: Path, bg_dir: str | None, seed: int) -> list[tupl
                 break
         if candidates:  # the training data keeps its hard cases; the showcase shows a clear one
             crops.append(max(candidates, key=lambda c: _clarity(c[0])))
-    for group, lang in HAND_CROPS:
-        candidates = []
-        for text in pool.get((group, lang), [])[20:60]:
-            worker.selector.language = lang
-            hand = worker.selector.get_handwriting_font(text)
-            if hand and (img := worker.gen.generate_image(text, font_path=hand)) is not None:
-                candidates.append((img.convert("RGB"), text, True))
-            if len(candidates) == 3:
-                break
-        if candidates:
-            crops.append(max(candidates, key=lambda c: _clarity(c[0])))
+    for rows, signed in ((HAND_CROPS, False), (SIGN_CROPS, True)):
+        for group, lang in rows:
+            candidates = []
+            texts = pool.get((group, lang), [])
+            # a signature is a name: letters only, capitalized, other words than the handwritten row
+            texts = [t[:1].upper() + t[1:] for t in texts[60:200] if t.isalpha()] if signed else texts[20:60]
+            for text in texts:
+                worker.selector.language = lang
+                face = (
+                    worker.selector.get_signature_font(text) if signed else worker.selector.get_handwriting_font(text)
+                )
+                strength = random.uniform(0.7, 1.0) if signed else random.uniform(0.4, 1.0)
+                if face and (img := worker.gen.generate_image(text, font_path=face, hand=strength)) is not None:
+                    candidates.append((img.convert("RGB"), text, True))
+                if len(candidates) == 3:
+                    break
+            if candidates:
+                crops.append(max(candidates, key=lambda c: _clarity(c[0])))
     return crops
 
 
@@ -306,7 +323,7 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector, styles=(
     slots += [(first_written + i, c) for i, c in enumerate(written)]
     if written:
         label_y = y + (first_written // COLS) * (CELL_H + GAP) - 4
-        ImageDraw.Draw(sheet).text((MARGIN, label_y), "handwritten", fill=MUTED, font=small)
+        ImageDraw.Draw(sheet).text((MARGIN, label_y), "handwritten and signed", fill=MUTED, font=small)
     for i, (crop, text, hand) in slots:
         cx = MARGIN + (i % COLS) * (cell_w + GAP)
         cy = y + (i // COLS) * (CELL_H + GAP) + (40 if hand else 0)
@@ -325,7 +342,9 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector, styles=(
     if styles:
         y += ((len(slots) and max(i for i, _ in slots)) // COLS + 1) * (CELL_H + GAP) + (40 if written else 0) + 12
         heading(
-            y, "Font style", "word crops labelled with family, weight, italic, underline, strike-through and colour"
+            y,
+            "Font style",
+            "word crops labelled with family, weight, italic, underline, strike-through, colour and handwriting",
         )
         y += 58
         for i, (crop, r) in enumerate(styles):
@@ -343,6 +362,7 @@ def compose(pages, crops, ui_font: str, selector: ManifestFontSelector, styles=(
             tags += [f"{r['underline']} underline"] if r["underline"] != "none" else []
             tags += ["strike"] if r["strikethrough"] else []
             tags += [f"{r['highlight']} highlight"] if r["highlight"] else []
+            tags += ["handwritten"] if r.get("handwritten") else []
             for k, (line, colour) in enumerate(((r["font"], LABEL), (" · ".join(tags), MUTED))):
                 face = _fit(line, cell_w - 12)
                 tw = draw.textlength(line, font=face)

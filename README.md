@@ -18,8 +18,8 @@ and 24 scripts.
   crop shows a tofu box, a dotted circle or an empty glyph its label doesn't mention.
 - **Complete vocab coverage** - every character of the docTR vocab you train on appears in train *and* val.
 - **Realistic documents** - paragraphs, newspapers, forms, tables, receipts, ID cards and vertical CJK text
-  on real paper sizes and on generated magazine-style designs, with photos, stamps, handwriting, barcodes
-  and punch holes; folded or crumpled;
+  on real paper sizes and on generated magazine-style designs, with photos, stamps, handwriting, signatures,
+  barcodes and punch holes; folded or crumpled;
   scanned in colour, grayscale or black-and-white, or photographed on tablecloths and tables (bent sheets,
   perspective, uneven light, shadows, colour casts).
 - **Hard negatives** - unlabelled show-through from the back of the sheet, and pages with no text at all
@@ -145,8 +145,11 @@ python scripts/build_font_style.py               --out font_style        # 300k 
 `--languages` takes `european`, `multilingual` (every non-CJK vocab: 96 languages) or `all`, or
 codes such as `de,fr,ru`. `--num-train`, `--num-val` and `--min-char-count` set the size and the
 per-character floor (`--min-char-count-large`, default `50`, for the thousands of CJK ideographs and Hangul
-syllables). Recognition: `--handwriting-share` (default `0.05`) writes crops in one of ~40
-handwriting faces (Latin, Cyrillic, Greek, Arabic, Hebrew, Thai, Indic, CJK, Korean). Detection:
+syllables). Recognition: `--handwriting-share` (default `0.05`) writes crops in one of ~60
+handwriting faces (Latin, Cyrillic, Greek, Arabic, Hebrew, Thai, Indic, CJK, Korean) - a fifth of them signed in one
+of 13 signature faces - most drawn with the variation of a hand (wavy baseline, wandering letters, uneven pressure).
+Both recipes also render the free metric-compatible clones of the common document fonts (Times, Helvetica, Courier,
+Cambria, Computer Modern, ...). Detection:
 `--density` (`mixed` by default: 55% letters, 30% reports, 15% broadsheet-dense pages with up to ~2500
 words), `--negative-share` (default `0.05`, pages without text) and `--input-size` (default `1024`, the
 docTR `--input_size` you train at: every word stays at least 5-6 px tall there). Train with docTR as usual:

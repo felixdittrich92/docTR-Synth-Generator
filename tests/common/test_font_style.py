@@ -35,6 +35,18 @@ def test_font_traits_read_the_tables(tmp_path):
     assert tb.weight_range is None and tb.underline == (-100, 50)
 
 
+@pytest.mark.parametrize(("angle", "italic"), [(-14.0, True), (17.0, False), (-0.2, False)])
+def test_only_a_right_leaning_angle_makes_an_upright_regular_italic(tmp_path, angle, italic):
+    from fontTools.ttLib import TTFont
+
+    path = str(tmp_path / f"r{angle}.ttf")
+    build_font(path, "abc", family="Slant Test")
+    font = TTFont(path)
+    font["post"].italicAngle = angle  # italic bit unset, Regular subfamily: only the angle speaks
+    font.save(path)
+    assert font_traits(path).italic is italic
+
+
 def test_weights_snap_to_the_css_scale():
     assert _standard_weight(250) == 200 and _standard_weight(275) == 200  # Windows ExtraLight stand-ins
     assert _standard_weight(5) == 500 and _standard_weight(700) == 700
@@ -109,6 +121,50 @@ def test_styled_crops_report_their_ink(tmp_path, temp_image_dir):
     assert result is not None
     image, info = result
     assert image.mode == "RGB" and info["color"] in COLOR_NAMES
+
+
+def test_styled_crops_carry_neighbouring_lines_but_never_a_rule(tmp_path, temp_image_dir):
+    from generator.components.font_selector import FontSelector
+    from generator.components.generator import TextImageGenerator
+    from generator.components.text_renderer import TextStyle
+
+    path = build_font(str(tmp_path / "f.ttf"), VOCABS["english"] + " ")
+    cfg = GenerationConfig.flat(task="recognition", output_dir=str(tmp_path), font_dir=str(tmp_path),
+                                bg_image_dir=temp_image_dir)  # fmt: skip
+    gen = TextImageGenerator(cfg, font_selector=FontSelector(str(tmp_path), auto_download=False))
+    style = TextStyle(fill_color=(0, 0, 0), opacity=255, bold_width=0)
+
+    def full_rows(rules):  # a rule spans the crop (or the word): fragments of text never do
+        random.seed(0)
+        found = 0
+        for _ in range(60):
+            layer = gen._context((200, 80), (20, 25, 180, 55), "Text", path, 24, style, rules=rules)
+            if layer is not None:
+                alpha = np.asarray(layer.getchannel("A")) > 0
+                found += int((alpha.mean(axis=1) > 0.75).any())
+        return found
+
+    assert full_rows(True) > 0 and full_rows(False) == 0
+
+    random.seed(0)
+    sides = below = 0
+    for _ in range(60):  # cell borders: sides and the edge above, never a rule below the word (an underline)
+        layer = gen._context((200, 80), (20, 25, 180, 55), "Text", path, 24, style, rules=False, cells=True)
+        if layer is not None:
+            alpha = np.asarray(layer.getchannel("A")) > 0
+            sides += int((alpha.mean(axis=0) > 0.95).any())
+            below += int((alpha[55:].mean(axis=1) > 0.75).any())
+    assert sides > 0 and below == 0
+
+
+def test_typeset_hands_are_written_or_printed():
+    from generator.recipes.font_style import StyleWorker
+
+    rng = random.Random(0)
+    written = [StyleWorker._spec(None, rng, handwritten=True, written=True).hand for _ in range(200)]
+    hands = [StyleWorker._spec(None, rng, handwritten=True).hand for _ in range(200)]
+    assert min(written) >= 0.4  # what a hand wrote always shows the hand
+    assert 0 < sum(h == 0 for h in hands) < 100  # the other hands: some clean renders, as before
 
 
 def test_plan_reaches_bold_and_italic_shares():
@@ -253,6 +309,48 @@ def test_scaled_copies_lose_their_languages(tmp_path):
     assert drop == {"Base Sans Hebrew": {"en"}}
 
 
+def test_latin_lookalikes_of_document_fonts_keep_only_their_script():
+    from generator.recipes.font_style import _foreign_alphabets
+
+    families = {
+        "Scheherazade New": {"languages": {"ar", "en", "de", "ru"}},  # its Latin and Cyrillic read as Times
+        "Noto Sans Arabic": {"languages": {"ar", "en"}},  # not listed: a copy, which _borrowed drops
+        "Kalam": {"languages": {"hi", "en"}},  # its Latin is a hand of its own
+        "Roboto": {"languages": {"en", "ru"}},
+    }
+    families["Aparajita"] = {"languages": {"hi", "en"}}  # a serif made for Devanagari: Times-like Latin
+    families["Poppins"] = {"languages": {"hi", "en"}}  # a sans made for Devanagari, a Latin design of its own
+    families["Lora"] = {"languages": {"en", "ru"}}
+    categories = {"Aparajita": "SERIF", "Poppins": "SANS_SERIF", "Lora": "SERIF", "Kalam": "HANDWRITING"}
+    scripts = {"Aparajita": "Deva", "Poppins": "Deva", "Lora": "Latn", "Kalam": "Deva"}
+    drop = _foreign_alphabets(families, categories, scripts)
+    assert drop == {"Scheherazade New": {"en", "de", "ru"}, "Aparajita": {"en"}}
+
+
+def test_designs_merge_with_the_languages_of_their_faces():
+    from generator.recipes.font_style import _merge_designs, _plan
+
+    def fam(file, langs):
+        face = {"file": file, "italic": False, "weight": 400, "weight_range": None, "languages": set(langs)}
+        return {"languages": set(langs), "variants": {file: face}}
+
+    families = {
+        "Arimo": fam("arimo.ttf", ["en", "ru", "el"]),
+        "Arial": fam("arial.ttf", ["en", "ar"]),
+        "Fira Sans": fam("fira.ttf", ["en"]),
+        "Fira Sans Condensed": fam("firac.ttf", ["en", "ru"]),
+    }
+    _merge_designs(families, {"Fira Sans": ("Fira Sans Condensed",)})
+    _merge_designs(families, {"Arimo": ("Arial",)}, frozenset({"LATIN", "CYRILLIC", "GREEK"}))
+    assert families["Fira Sans"]["languages"] == {"en", "ru"} and not families["Fira Sans Condensed"]["languages"]
+    assert families["Arial"]["languages"] == {"ar"}  # its Arabic stays its own
+    assert set(families["Arimo"]["variants"]) == {"arimo.ttf", "arial.ttf"}
+    variants = [{**v, "languages": sorted(v["languages"] & families["Arimo"]["languages"])}
+                for v in families["Arimo"]["variants"].values()]  # fmt: skip
+    rows = _plan(400, {"Arimo": {"languages": ["el", "en", "ru"], "variants": variants}}, {}, random.Random(0))
+    assert all(lang == "en" for _, file, _, lang, _ in rows if file == "arial.ttf")  # never Greek in Arial
+
+
 def test_plan_draws_document_fonts_more_often():
     from generator.recipes.font_style import _plan
 
@@ -266,7 +364,7 @@ def test_plan_draws_document_fonts_more_often():
 def test_document_fonts_come_from_the_cache_offline(tmp_path, monkeypatch):
     import zipfile
 
-    from generator.recipes import font_style
+    from generator.recipes import fonts as font_style
 
     folder = tmp_path / "doc_fonts"
     folder.mkdir()
@@ -279,9 +377,9 @@ def test_document_fonts_come_from_the_cache_offline(tmp_path, monkeypatch):
     with zipfile.ZipFile(folder / "lm.zip", "w") as z:
         z.writestr("lm/otf/lmroman10-regular.otf", b"otf")
     with pytest.raises(KeyError):  # a member missing from the archive is an error, not a silent gap
-        font_style._doc_fonts(tmp_path, offline=True)
+        font_style.doc_fonts(tmp_path, offline=True)
     monkeypatch.setattr(font_style, "DOC_FONT_ARCHIVES", [(url, ["lm/otf/lmroman10-regular.otf"])])
-    paths = font_style._doc_fonts(tmp_path, offline=True)
+    paths = font_style.doc_fonts(tmp_path, offline=True)
     assert [p.name for p in paths] == ["tinos__Tinos-Regular.ttf", "lmroman10-regular.otf"]
     assert (folder / "lmroman10-regular.otf").read_bytes() == b"otf"
 
@@ -291,3 +389,52 @@ def test_known_categories_are_valid():
 
     assert set(KNOWN_CATEGORIES.values()) <= set(CATEGORIES)
     assert KNOWN_CATEGORIES["TeX Gyre Termes"] == "SERIF" and KNOWN_CATEGORIES["TeX Gyre Heros"] == "SANS_SERIF"
+
+
+def test_hand_warp_moves_the_ink_like_a_hand(tmp_path):
+    from generator.components.font_styles import hand_warp
+
+    coverage = Image.new("RGBA", (300, 80), (0, 0, 0, 0))
+    alpha = np.zeros((80, 300), np.uint8)
+    alpha[20:60, 20:280:20] = 255  # vertical strokes, like letters
+    alpha[66:69, 20:280] = 255  # an underline
+    coverage.putalpha(Image.fromarray(alpha))
+    assert hand_warp(coverage, 0.0) is coverage
+    warped = hand_warp(coverage, 1.0, np.random.default_rng(0))
+    out = np.asarray(warped.getchannel("A"), np.float32)
+    pad = (warped.width - coverage.width) // 2
+    assert warped.mode == "RGBA" and warped.height - coverage.height == 2 * pad > 0
+    # the ink moves (the underline is no longer a straight row) but none of it is lost
+    rows = out[:, 20 + pad : 280 + pad]
+    underline_rows = {int(np.argmax(rows[60 + pad :, x])) for x in range(0, 260, 10)}
+    assert len(underline_rows) > 1
+    assert 0.6 * alpha.sum() < out.sum() <= alpha.sum() * 1.05
+
+
+def test_handwritten_families():
+    from generator.recipes.font_style import PRINTED_LOOKALIKES, is_handwritten
+
+    assert is_handwritten("Caveat", "HANDWRITING")
+    assert not is_handwritten("Comic Neue", "HANDWRITING") and "Comic Neue" in PRINTED_LOOKALIKES
+    assert not is_handwritten("Roboto", "SANS_SERIF")
+
+
+def test_handwriting_fonts_come_from_the_cache_offline(tmp_path, monkeypatch):
+    from generator.recipes import font_style
+
+    folder = tmp_path / "handwriting_fonts"
+    folder.mkdir()
+    (folder / "caveat__Caveat_wght_.ttf").write_bytes(b"ttf")
+    monkeypatch.setattr(font_style, "_HANDWRITING_FONTS", {"latin": [("caveat", ["Caveat[wght].ttf"])]})
+    monkeypatch.setattr(font_style, "_SIGNATURE_FONTS", {"latin": [("allura", ["Allura-Regular.ttf"])]})
+    paths = font_style._handwriting_fonts(tmp_path, offline=True)
+    assert [p.name for p in paths] == ["caveat__Caveat_wght_.ttf"]  # the signature face is not cached
+
+
+def test_merged_classes_keep_the_share_of_their_faces():
+    from generator.recipes.font_style import DOC_FONT_WEIGHT, _family_weights
+
+    weights = _family_weights({"Tinos", "Lato", "Fira Sans", "Lora"}, {"Tinos", "TeX Gyre Termes", "Carlito"})
+    assert weights["Tinos"] == 2 * DOC_FONT_WEIGHT + 1  # Tinos and TeX Gyre Termes (documents), Roman Unicode
+    assert weights["Lato"] == DOC_FONT_WEIGHT + 1  # Carlito (Calibri) is drawn from Lato
+    assert weights["Fira Sans"] == 3 and weights["Lora"] == 1  # two condensed cuts; no merge

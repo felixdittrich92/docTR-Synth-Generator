@@ -8,7 +8,7 @@ import math
 import multiprocessing as mp
 import random
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from queue import Empty
 
 import numpy as np
@@ -18,6 +18,7 @@ from .background_manager import BackgroundManager
 from .capture import apply_capture, should_capture
 from .config import GenerationConfig
 from .font_selector import FontSelector
+from .font_styles import hand_warp
 from .legibility import DegradationBudget
 from .media import PageMedia, apply_delivery_resample, media_for_pinned_size, sample_media
 from .scan import MIN_BITONAL_PAGE_TEXT_PX, apply_scan_tone
@@ -32,6 +33,12 @@ from .text_styling import (
 )
 from .textures import apply_creases, fabric, surface, wood
 from .token_sampler import TokenSampler
+
+# Handwritten words drawn with the variation of a hand (wavy baseline, wandering letters, uneven
+# pressure): the rest keep the regularity of the handwriting font.
+HAND_WARP_PROB = 0.8
+# Signatures written as a name in a signature face (labelled words); the rest are unreadable squiggles.
+WRITTEN_SIGNATURE_PROB = 0.6
 
 __all__ = ["PageGenerator", "DetectionTask"]
 
@@ -891,7 +898,8 @@ class PageGenerator:
             polygons[:] = self._occlude(polygons, bar)
 
         if random.random() < cfg.signature_prob:
-            self._draw_signature(draw, area)
+            if random.random() >= WRITTEN_SIGNATURE_PROB or not self._sign(page, area, take_word, polygons):
+                self._draw_signature(draw, area)
 
     @staticmethod
     def _clip_polygons(polygons: list[Polygon], width: int, height: int) -> list[Polygon]:
@@ -1076,6 +1084,68 @@ class PageGenerator:
                 outline=(*ink, 210),
                 width=max(2, font_size // 10),
             )
+
+    def _sign(self, page, area, take_word, polygons, font_size: int | None = None) -> bool:
+        """Sign inside ``area``: one or two words (a name) in a signature face, drawn by a quick hand and boxed
+        like any word. False when no signature face covers the text (e.g. a script without one) or no free spot
+        fits it - the caller may draw an unreadable squiggle instead."""
+        bx0, by0, bx1, by1 = area
+        words = [take_word() for _ in range(random.choice((1, 2, 2)))]
+        words = [w[:1].upper() + w[1:] for w in words if w and not any(c.isdigit() for c in w)]
+        if not words:
+            return False
+        font_path = self.font_selector.get_signature_font(" ".join(words))
+        if font_path is None:
+            return False
+        base = font_size or self._body_font()
+
+        def _render(size: int) -> list[Image.Image]:
+            """The words drawn by a quick hand, cropped to their ink: script faces carry tall empty margins."""
+            out = []
+            for word in words:
+                coverage = self.text_renderer.render_coverage(word, font_path, size, 0)
+                rng = np.random.default_rng(random.getrandbits(32))
+                coverage = hand_warp(coverage, random.uniform(0.7, 1.0), rng)
+                box = coverage.getchannel("A").getbbox()
+                if box:
+                    out.append(coverage.crop((max(0, box[0] - 2), max(0, box[1] - 2), box[2] + 2, box[3] + 2)))
+            return out
+
+        size = int(base * random.uniform(1.4, 2.2))
+        coverages = _render(size)
+        if not coverages:
+            return False
+        # As large as the area allows (a signature line on a card is short), never smaller than the text
+        ink_height = max(c.height for c in coverages)
+        if ink_height > by1 - by0:
+            size = int(size * (by1 - by0) / ink_height)
+            if size < base:
+                return False
+            coverages = _render(size)
+            if not coverages or max(c.height for c in coverages) > by1 - by0:
+                return False
+        gap = int(size * 0.3)
+        width = sum(c.width for c in coverages) + gap * (len(coverages) - 1)
+        height = max(c.height for c in coverages)
+        taken = [(min(p[0] for p in poly), min(p[1] for p in poly), max(p[0] for p in poly), max(p[1] for p in poly))
+                 for poly in polygons]  # fmt: skip
+        for _ in range(20):  # a free spot: a signature never covers printed words
+            x = random.randint(bx0, max(bx0, bx1 - width))
+            y = random.randint(by0, max(by0, by1 - height))
+            if x + width > bx1 or y + height > by1:
+                return False
+            if not any(x < t[2] and t[0] < x + width and y < t[3] and t[1] < y + height for t in taken):
+                break
+        else:
+            return False
+        style = self._style_at(page, x, y, width, height, 0)
+        if sum(style.fill_color) < 240 and random.random() < 0.6:  # dark ink on paper: a ballpoint, often blue
+            style = replace(style, fill_color=random.choice([(25, 40, 120), (20, 30, 95), (15, 15, 25)]))
+        placed = False
+        for coverage in coverages:
+            placed |= self._emit(page, coverage, style, x, y + random.randint(-gap // 3, gap // 3), polygons)
+            x += coverage.width + gap
+        return placed
 
     @staticmethod
     def _draw_signature(draw, area) -> None:
@@ -1430,6 +1500,8 @@ class PageGenerator:
             if font_path is None:
                 return placed
             coverage = self.text_renderer.render_coverage(word, font_path, font_size, 0)
+            if random.random() < HAND_WARP_PROB:  # a hand, not a handwriting font: the box follows the ink
+                coverage = hand_warp(coverage, random.uniform(0.4, 1.0), np.random.default_rng(random.getrandbits(32)))
             width = coverage.width
             paste_x = cursor - width if self._rtl_page else cursor
             if (paste_x < bx0) if self._rtl_page else (paste_x + width > bx1):
@@ -1886,16 +1958,19 @@ class PageGenerator:
 
         label_col = int((bx1 - bx0) * random.uniform(0.3, 0.42))
         boxed = random.random() < 0.5  # this form draws boxed fields rather than underlines
-        while y < by1:
+        # A filled-in form is signed at the bottom: its fields leave room for the signature
+        signed = random.random() < self.config.detection.handwriting_prob
+        rows_end = by1 - (self._body_font() * 4 if signed else 0)
+        while y < rows_end:
             font_size = self._body_font()
             row_h = int(font_size * 2.1)
-            if y + row_h > by1:
+            if y + row_h > rows_end:
                 break
             r = random.random()
             if r < 0.12:  # section header on a shaded bar
                 sfs = int(font_size * 1.25)
                 bar_h = int(sfs * 1.7)
-                if y + bar_h > by1:
+                if y + bar_h > rows_end:
                     break
                 draw.rectangle((bx0, y, bx1, y + bar_h), fill=(225, 227, 234))
                 sbw = self._heading_bold(sfs)
@@ -1960,6 +2035,12 @@ class PageGenerator:
                 ly = int(y + font_size * 1.35)
                 draw.line((fx0, ly, fx1, ly), fill=(165, 165, 175), width=1)
             y += row_h
+        if signed:  # the signature, on a line
+            fs = self._body_font()
+            sx1 = bx0 + int((bx1 - bx0) * random.uniform(0.35, 0.55))
+            line_y = min(by1 - 2, y + fs * 3)
+            if self._sign(page, (bx0, y, sx1, line_y), take_word, polygons, fs):
+                draw.line((bx0, line_y, sx1, line_y), fill=(150, 150, 160), width=1)
 
     def _layout_id_card(self, page, area, take_word, rtl, polygons) -> None:
         bx0, by0, bx1, by1 = area
@@ -2034,7 +2115,7 @@ class PageGenerator:
         fs = max(self._min_font(), int(card_h * 0.062))
         label_col = int((fx1 - fx0) * 0.42)
         mrz_reserve = int(fs * 2.6)
-        sig_reserve = int(fs * 1.6)
+        sig_reserve = int(fs * 2.4)  # room to sign above the line
         fy = body_top
         while fy + int(fs * 1.8) <= cy1 - pad - mrz_reserve - sig_reserve:
             label = take_word().capitalize() + ":"
@@ -2055,9 +2136,12 @@ class PageGenerator:
                 self._fill_box(page, vbox, take_word, polygons, fs, vstyle, 0, rtl, max_lines=1)
             fy += int(fs * 1.95)
 
-        # Signature line above the MRZ.
+        # Signature line above the MRZ, signed by the holder.
         sy = cy1 - pad - mrz_reserve - int(fs * 0.6)
         draw.line((fx0, sy, fx0 + int((fx1 - fx0) * 0.5), sy), fill=(120, 120, 135), width=1)
+        if random.random() < WRITTEN_SIGNATURE_PROB:
+            self._sign(page, (fx0, max(fy, sy - int(fs * 2.6)), fx0 + int((fx1 - fx0) * 0.5), sy), take_word,
+                       polygons, fs)  # fmt: skip
 
         # MRZ block at the bottom, sized to fit the card width.
         mfs = max(self._min_font(), int(card_h * 0.07))

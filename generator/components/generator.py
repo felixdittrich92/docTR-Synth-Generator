@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw
 from .background_manager import BackgroundManager
 from .config import GenerationConfig
 from .font_selector import FontSelector
-from .font_styles import StyleSpec, color_name, paint_highlight
+from .font_styles import StyleSpec, color_name, hand_warp, paint_highlight
 from .legibility import DegradationBudget, local_ink_contrast
 from .scan import apply_scan_tone
 from .text_renderer import TextRenderer, TextStyle
@@ -103,13 +103,14 @@ class TextImageGenerator:
         budget = DegradationBudget.for_text_height(text_height) if text_height else None
         return apply_final_degradations(self.config, image, self.final_augs, budget)
 
-    def generate_image(self, text: str, font_path: str | None = None) -> Image.Image | None:
+    def generate_image(self, text: str, font_path: str | None = None, hand: float = 0.0) -> Image.Image | None:
         """Generate a single text overlay image.
 
         Args:
             text (str): Text to render
             font_path (str | None): use this face (e.g. a handwriting face) instead of
                 resolving one through the font selector.
+            hand (float): strength of the pen variation (:func:`hand_warp`) for handwriting, 0 for print.
 
         Returns:
             Image.Image | None: RGB image with realistic text overlay, or None if
@@ -118,19 +119,22 @@ class TextImageGenerator:
         font_path = font_path or self.font_selector.get_font_for_text(text)
         if not font_path:
             return None
-        result = self._generate(text, font_path, None)
+        result = self._generate(text, font_path, None, hand)
         return result[0] if result else None
 
     def generate_styled(self, text: str, font_path: str, spec: StyleSpec) -> tuple[Image.Image, dict] | None:
         """A crop of ``text`` in ``font_path`` drawn in ``spec``, and what it shows.
 
-        For font-style data: no faux bold, no outline and no neighbouring-line context
-        (a table rule in the margin would look like an underline). Returns the image
+        For font-style data: no faux bold, no outline, and of the page context the
+        neighbouring lines and the borders of a cell, but never a rule below the word (it would
+        look like an underline). Returns the image
         and ``{"color": ...}``, the ink colour measured on the finished crop.
         """
         return self._generate(text, font_path, spec)
 
-    def _generate(self, text: str, font_path: str, spec: StyleSpec | None) -> tuple[Image.Image, dict] | None:
+    def _generate(
+        self, text: str, font_path: str, spec: StyleSpec | None, hand: float = 0.0
+    ) -> tuple[Image.Image, dict] | None:
         """The re-draw loop shared by :meth:`generate_image` and :meth:`generate_styled`."""
         # Background and ink are re-drawn until the finished crop is readable along
         # its whole length: a dark band or busy patch of paper under part of the
@@ -157,6 +161,9 @@ class TextImageGenerator:
                     break
             if coverage is None:
                 continue
+            strength = spec.hand if spec is not None else hand
+            if strength > 0:
+                coverage = hand_warp(coverage, strength, np.random.default_rng(random.getrandbits(32)))
             for _ in range(max(1, self.config.core.max_attempts)):
                 image, alpha = self._compose(text, font_path, font_size, coverage, outline_width, bold_width, spec)
                 if min_contrast <= 0 or local_ink_contrast(image, alpha) >= min_contrast:
@@ -191,23 +198,54 @@ class TextImageGenerator:
         return tuple(int(round(text_height * random.uniform(lo, hi))) for _ in range(4))  # type: ignore[return-value]
 
     def _context(
-        self, size: tuple[int, int], box: tuple[int, int, int, int], text: str, font_path: str, font_size: int, style
+        self,
+        size: tuple[int, int],
+        box: tuple[int, int, int, int],
+        text: str,
+        font_path: str,
+        font_size: int,
+        style,
+        rules: bool = True,
+        weight: int | None = None,
+        hand: float = 0.0,
+        cells: bool = False,
     ) -> Image.Image | None:
         """What a real crop picks up around a word: neighbouring lines and rules, in its margins only.
 
         ``box`` is where the word sits. Line fragments are placed so they leave the
         crop through its top or bottom edge - only the descenders of the line above
         or the tops of the line below show, never a readable character. They use the
-        word's own font and ink, so they are rendered (and shaped) like the word.
+        word's own font, ``weight``, ink and pen variation (``hand``), so they are
+        rendered (and shaped) like the word. ``rules=False`` leaves out the underlines
+        and table rules (a font-style label tells an underline); ``cells=True`` draws
+        the borders of a form or table cell instead: its sides, and its edge above
+        the word - never one below, where it would read as an underline.
         """
         width, height = size
         x0, y0, x1, y1 = box
         layer = Image.new("RGBA", size, (0, 0, 0, 0))
         placed = False
+        if cells and random.random() < 0.5:
+            thickness = max(1, font_size // 18)
+            border = (*style.fill_color, style.opacity) if random.random() < 0.5 else (90, 90, 90, 255)
+            draw = ImageDraw.Draw(layer)
+            for side, room in (("left", x0), ("right", width - x1)):
+                if room > thickness and random.random() < 0.6:
+                    x = (
+                        random.randint(0, room - thickness)
+                        if side == "left"
+                        else x1 + random.randint(0, room - thickness)
+                    )
+                    draw.rectangle((x, 0, x + thickness - 1, height), fill=border)
+                    placed = True
+            if y0 > thickness and random.random() < 0.4:
+                y = random.randint(0, y0 - thickness)
+                draw.rectangle((0, y, width, y + thickness - 1), fill=border)
+                placed = True
         for edge, room in (("top", y0), ("bottom", height - y1)):
             if room < 3 or random.random() >= 0.6:
                 continue
-            if random.random() < 0.3:  # an underline or a table rule
+            if rules and random.random() < 0.3:  # an underline or a table rule
                 thickness = max(1, font_size // 18)
                 y = random.randint(0, room - thickness) if edge == "top" else y1 + random.randint(0, room - thickness)
                 left, right = (
@@ -219,8 +257,14 @@ class TextImageGenerator:
                 placed = True
                 continue
             fragment = self.text_renderer.render_coverage(
-                text if random.random() < 0.5 else f"{text} {text}", font_path, font_size, style.bold_width
+                text if random.random() < 0.5 else f"{text} {text}",
+                font_path,
+                font_size,
+                style.bold_width,
+                weight=weight,
             )
+            if hand > 0:
+                fragment = hand_warp(fragment, hand, np.random.default_rng(random.getrandbits(32)))
             ink = recolor_coverage(fragment, style)
             visible = random.randint(max(1, room // 3), room)  # never past the word's own line
             y = visible - ink.height if edge == "top" else height - visible
@@ -279,9 +323,20 @@ class TextImageGenerator:
         word = Image.new("RGBA", size, (0, 0, 0, 0))
         word.paste(glyph, (left, top))
         canvas = bg_crop.convert("RGBA")
-        if spec is None and random.random() < self.config.recognition.context_prob:
+        if random.random() < self.config.recognition.context_prob:
+            # Styled crops (font style labels): the neighbouring lines and cell borders, never a rule below the word
+            # (it would read as an underline)
             context = self._context(
-                size, (left, top, left + glyph.width, top + glyph.height), text, font_path, font_size, style
+                size,
+                (left, top, left + glyph.width, top + glyph.height),
+                text,
+                font_path,
+                font_size,
+                style,
+                rules=spec is None,
+                weight=spec.weight if spec is not None else None,
+                hand=spec.hand if spec is not None else 0.0,
+                cells=spec is not None,  # form labels sit in boxes: their sides and top edge, never a rule below
             )
             if context is not None:
                 canvas.alpha_composite(context)

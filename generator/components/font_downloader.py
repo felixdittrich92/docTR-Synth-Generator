@@ -115,6 +115,28 @@ _HANDWRITING_FONTS: dict[str, list[tuple[str, list[str]]]] = {
         ("gochihand", ["GochiHand-Regular.ttf"]),
         ("handlee", ["Handlee-Regular.ttf"]),
         ("playpensans", ["PlaypenSans[wght].ttf"]),
+        # block capitals and markers, quick notes
+        ("permanentmarker", ["PermanentMarker-Regular.ttf"]),
+        ("rocksalt", ["RockSalt-Regular.ttf"]),
+        ("schoolbell", ["Schoolbell-Regular.ttf"]),
+        ("justanotherhand", ["JustAnotherHand-Regular.ttf"]),
+        ("craftygirls", ["CraftyGirls-Regular.ttf"]),
+        ("comingsoon", ["ComingSoon-Regular.ttf"]),
+        ("walterturncoat", ["WalterTurncoat-Regular.ttf"]),
+        ("rancho", ["Rancho-Regular.ttf"]),
+        ("caveatbrush", ["CaveatBrush-Regular.ttf"]),
+        ("gloriahallelujah", ["GloriaHallelujah.ttf"]),
+        ("sueellenfrancisco", ["SueEllenFrancisco-Regular.ttf"]),
+        ("waitingforthesunrise", ["WaitingfortheSunrise.ttf"]),
+        ("overtherainbow", ["OvertheRainbow.ttf"]),
+        ("annieuseyourtelescope", ["AnnieUseYourTelescope-Regular.ttf"]),
+        ("shortstack", ["ShortStack-Regular.ttf"]),
+        ("sedgwickave", ["SedgwickAve-Regular.ttf"]),
+        ("thegirlnextdoor", ["TheGirlNextDoor.ttf"]),
+        ("zeyada", ["Zeyada.ttf"]),
+        ("dawningofanewday", ["DawningofaNewDay.ttf"]),
+        ("labelleaurore", ["LaBelleAurore.ttf"]),
+        ("playwritegbs", ["PlaywriteGBS[wght].ttf"]),
     ],
     "cyrillic": [
         ("caveat", ["Caveat[wght].ttf"]),
@@ -167,11 +189,42 @@ _HANDWRITING_FONTS: dict[str, list[tuple[str, list[str]]]] = {
     ],
     "korean": [
         ("nanumpenscript", ["NanumPenScript-Regular.ttf"]),
+        ("nanumbrushscript", ["NanumBrushScript-Regular.ttf"]),
         ("gaegu", ["Gaegu-Regular.ttf"]),
         ("gamjaflower", ["GamjaFlower-Regular.ttf"]),
         ("himelody", ["HiMelody-Regular.ttf"]),
     ],
 }
+
+# Signature styles: names signed at the bottom of letters, forms and ID cards - joined,
+# fast and slanted scripts that a filled-in form value would not be written in.
+_SIGNATURE_FONTS: dict[str, list[tuple[str, list[str]]]] = {
+    "latin": [
+        ("homemadeapple", ["HomemadeApple-Regular.ttf"]),
+        ("herrvonmuellerhoff", ["HerrVonMuellerhoff-Regular.ttf"]),
+        ("mrdafoe", ["MrDafoe-Regular.ttf"]),
+        ("satisfy", ["Satisfy-Regular.ttf"]),
+        ("yellowtail", ["Yellowtail-Regular.ttf"]),
+        ("allura", ["Allura-Regular.ttf"]),
+        ("sacramento", ["Sacramento-Regular.ttf"]),
+        ("greatvibes", ["GreatVibes-Regular.ttf"]),
+        ("dancingscript", ["DancingScript[wght].ttf"]),
+        ("cookie", ["Cookie-Regular.ttf"]),
+        ("kristi", ["Kristi-Regular.ttf"]),
+        ("cedarvillecursive", ["Cedarville-Cursive.ttf"]),
+    ],
+    "cyrillic": [
+        ("greatvibes", ["GreatVibes-Regular.ttf"]),
+        ("marckscript", ["MarckScript-Regular.ttf"]),
+    ],
+}
+
+# google/fonts licence folder of the faces that are not under ``ofl``
+_APACHE_FACES = (
+    "permanentmarker", "rocksalt", "schoolbell", "justanotherhand", "craftygirls", "comingsoon", "walterturncoat",
+    "rancho", "homemadeapple", "satisfy", "yellowtail",
+)  # fmt: skip
+_GF_LICENSE = dict.fromkeys(_APACHE_FACES, "apache")
 
 # A small, ordered fallback chain. Noto Sans (latin/greek/cyrillic) is tried
 # first because it covers the bulk of European text; CJK is the broadest net for
@@ -245,7 +298,7 @@ class FontDownloader:
         if local_name in self._failed_downloads:
             return None
 
-        url = f"{self.source_base_url}/ofl/{family}/{urllib.parse.quote(filename)}"
+        url = f"{self.source_base_url}/{_GF_LICENSE.get(family, 'ofl')}/{family}/{urllib.parse.quote(filename)}"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "docTR-Synth-Generator"})
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -295,10 +348,17 @@ class FontDownloader:
         Writers differ, so a crop picks among all of them rather than reusing
         the first face that happened to be downloaded.
         """
+        return self._faces(_HANDWRITING_FONTS, script)
+
+    def signature_faces(self, script: str) -> list[str]:
+        """Every signature face listed for ``script`` (:data:`_SIGNATURE_FONTS`), downloaded once and cached."""
+        return self._faces(_SIGNATURE_FONTS, script)
+
+    def _faces(self, table: dict[str, list[tuple[str, list[str]]]], script: str) -> list[str]:
         if not self.enabled:
             return []
         faces = []
-        for family, filenames in _HANDWRITING_FONTS.get(script, []):
+        for family, filenames in table.get(script, []):
             for filename in filenames:
                 with _DOWNLOAD_LOCK:
                     path = self._download(family, filename)

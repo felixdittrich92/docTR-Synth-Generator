@@ -50,11 +50,10 @@ from pathlib import Path
 from ..components.config import GenerationConfig
 from ..components.generator import TextImageGenerator
 from ..components.vocab_coverage import augment_words_for_coverage, is_large_script_char
-from ..components.vocabs import VOCABS
 from ..dataset_generator import SyntheticDatasetGenerator
 from .corpus import SYNTHETIC_LANGUAGES, THAI_MOJIBAKE, Corpus
 from .fonts import ManifestFontSelector, assign_fonts, collect_fonts, require_harfbuzz, scan_fonts, write_font_dir
-from .languages import LANGUAGES, allowed_scripts, primary_script, resolve_languages, script_of
+from .languages import LANGUAGES, allowed_scripts, lang_chars, primary_script, resolve_languages, script_of
 from .render import Progress, Worker, atomic_write_json, make_pool, render_part
 from .text import (
     attach_punct,
@@ -117,6 +116,9 @@ SHORT_TOP_RANKS = 5000
 # read verbatim. Real word lists contain none of them.
 MRZ_SHARE = 0.005
 HANDWRITING_SHARE = 0.05
+# Of the handwritten crops: the share signed (a signature face) and the share drawn with the
+# variation of a hand (wavy baseline, wandering letters, uneven pressure: ``hand_warp``).
+SIGNATURE_SHARE, HAND_WARP_PROB = 0.2, 0.8
 NATIVE_DIGIT_PROB = 0.4
 # Case variants, drawn independently per word and added next to it: forms, receipts and
 # headings are set in capitals far more than running text, so a pool of mostly lower-case
@@ -208,16 +210,16 @@ def _vocab_and_charsets(
     for lang in langs:
         key = LANGUAGES[lang][0]
         usable = set()
-        for c in VOCABS[key]:
+        for c in lang_chars(lang):
             if c.isspace() or c in DROP_CHARS:
                 continue
             if selector.candidates(c, lang):  # some face inks it (and can shape its script)
                 usable.add(c)
         charsets[lang] = usable | set(extra_chars)
-        missing = "".join(c for c in VOCABS[key] if not c.isspace() and c not in DROP_CHARS and c not in usable)
+        missing = "".join(c for c in lang_chars(lang) if not c.isspace() and c not in DROP_CHARS and c not in usable)
         if missing:
             dropped[key] = missing
-    order = "".join(VOCABS[LANGUAGES[lang][0]] for lang in langs) + extra_chars
+    order = "".join(lang_chars(lang) for lang in langs) + extra_chars
     vocab = "".join(c for c in dict.fromkeys(order) if any(c in cs for cs in charsets.values()))
     return vocab, charsets, dropped
 
@@ -259,7 +261,7 @@ def prepare(args) -> None:
     pools: dict[str, list[str]] = {}
     clean_stats: dict[str, dict] = {}
     for lang in langs:
-        own = set(VOCABS[LANGUAGES[lang][0]]) - set(DROP_CHARS)
+        own = set(lang_chars(lang)) - set(DROP_CHARS)
         words, st = clean_words(lang, corpus.raw_words(lang, rng), own, args.words_per_lang, rng)
         if words:
             pools[lang], clean_stats[lang] = words, dict(st)
@@ -527,8 +529,13 @@ class CropWorker(Worker):
         """Render ``(lang, text)``; the label record is the text itself."""
         lang, text = payload
         self.selector.language = None if lang == "*" else lang
-        hand = self.selector.get_handwriting_font(text) if random.random() < self.handwriting_share else None
-        img = self.gen.generate_image(text, font_path=hand)
+        hand = None
+        if random.random() < self.handwriting_share:
+            if random.random() < SIGNATURE_SHARE:
+                hand = self.selector.get_signature_font(text)
+            hand = hand or self.selector.get_handwriting_font(text)
+        strength = random.uniform(0.4, 1.0) if hand and random.random() < HAND_WARP_PROB else 0.0
+        img = self.gen.generate_image(text, font_path=hand, hand=strength)
         if img is None:
             return None
         img.save(path, self.save[0], **self.save[1])

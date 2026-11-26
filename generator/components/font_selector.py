@@ -8,7 +8,7 @@ import random
 
 from fontTools.ttLib import TTFont
 
-from .font_downloader import _HANDWRITING_FONTS, FontDownloader
+from .font_downloader import _HANDWRITING_FONTS, _SIGNATURE_FONTS, FontDownloader
 from .shaping import ShapingChecker
 
 __all__ = ["FontSelector"]
@@ -54,6 +54,8 @@ class FontSelector:
         # otherwise a downloaded script face leaks into body copy.
         self.handwriting_fonts: set[str] = set()
         self._handwriting_scripts: set[str] = set()  # scripts whose faces are fetched
+        self.signature_fonts: set[str] = set()  # signature faces, also kept out of printed text
+        self._signature_scripts: set[str] = set()
 
         if font_cache_dir is None:
             font_cache_dir = os.path.join(font_dir, "_downloaded") if font_dir else ".font_cache"
@@ -150,10 +152,28 @@ class FontSelector:
         ]
         return self._first_clean(text, local) if local else None
 
+    def get_signature_font(self, text: str) -> str | None:
+        """Get a random signature face (:data:`_SIGNATURE_FONTS`) covering ``text``, or ``None`` if there is none
+        (scripts without signature faces: callers draw an unreadable squiggle or keep a handwriting face)."""
+        required_chars = frozenset(c for c in text if not c.isspace())
+        if self.auto_download:
+            for script in (self.downloader.required_scripts(text) or set()) | {"latin"}:
+                if script in self._signature_scripts:
+                    continue
+                self._signature_scripts.add(script)
+                for path in self.downloader.signature_faces(script):
+                    if self._register_font(path):
+                        self.signature_fonts.add(path)
+                        self.handwriting_fonts.add(path)  # never used for printed text
+        local = [path for path, chars in self.font_support_table.items()
+                 if path in self.signature_fonts and required_chars.issubset(chars)]  # fmt: skip
+        return self._first_clean(text, local) if local else None
+
     @staticmethod
     def _looks_handwritten(font_path: str) -> bool:
         name = os.path.basename(font_path).lower()
-        return any(family in name for faces in _HANDWRITING_FONTS.values() for family, _ in faces)
+        tables = (*_HANDWRITING_FONTS.values(), *_SIGNATURE_FONTS.values())
+        return any(family in name for faces in tables for family, _ in faces)
 
     def get_font_for_text(self, text: str) -> str | None:
         """Get a font that supports all characters in ``text``.
